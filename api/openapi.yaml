@@ -1,0 +1,711 @@
+openapi: 3.0.3
+info:
+  title: building-land API
+  version: 1.0.0
+servers:
+  - url: https://api.building-land.com
+  - url: http://localhost
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /v1/app-config:
+    get:
+      summary: App config for version checks
+      parameters:
+        - name: platform
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [android, ios]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppConfigResponse'
+
+  /v1/simple-data/{doc_name}:
+    get:
+      summary: Simple data document
+      parameters:
+        - name: doc_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleDataResponse'
+
+  /v1/data/{collection}/{pnu}:
+    get:
+      summary: Compressed data by collection and pnu
+      parameters:
+        - name: collection
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: pnu
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [compressed, lines]
+            default: compressed
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/DataCompressedResponse'
+                  - $ref: '#/components/schemas/DataLinesResponse'
+
+  /v1/data/batch:
+    post:
+      summary: Batch data lookup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DataBatchRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataBatchResponse'
+
+  /v1/tile/{root}/{parent}/{id}:
+    get:
+      summary: Tile data
+      parameters:
+        - name: root
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: parent
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TileDataResponse'
+
+  /v1/tile/batch:
+    post:
+      summary: Batch tile lookup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TileBatchRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TileBatchResponse'
+
+  /v1/pnu/{pnu}/polygon:
+    get:
+      summary: PNU polygon data
+      parameters:
+        - name: pnu
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [raw, points]
+            default: raw
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PolygonRawResponse'
+                  - $ref: '#/components/schemas/PolygonPointsResponse'
+
+  /v1/geo/building:
+    get:
+      summary: Building geo features
+      parameters:
+        - name: pnu
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeoFeatureListResponse'
+
+  /v1/geo/building/violations:
+    get:
+      summary: Building violation map
+      parameters:
+        - name: pnu
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViolationResponse'
+
+  /v1/geo/land/{pnu}:
+    get:
+      summary: Land geo feature
+      parameters:
+        - name: pnu
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeoFeatureResponse'
+
+  /v1/geo/land/polygons:
+    post:
+      summary: Polygons by geohash prefixes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeoPrefixRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolygonListResponse'
+
+  /v1/geo/land/features:
+    post:
+      summary: Land features by geohash prefixes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeoPrefixRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeoFeatureListResponse'
+
+  /v1/addr/search:
+    get:
+      summary: Address search
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 10
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddressSearchResponse'
+
+  /v1/addr/coord2address:
+    get:
+      summary: Coord to address (Kakao)
+      parameters:
+        - name: x
+          in: query
+          required: true
+          schema:
+            type: number
+        - name: y
+          in: query
+          required: true
+          schema:
+            type: number
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericResponse'
+
+  /v1/addr/coord2region:
+    get:
+      summary: Coord to region (Kakao)
+      parameters:
+        - name: x
+          in: query
+          required: true
+          schema:
+            type: number
+        - name: y
+          in: query
+          required: true
+          schema:
+            type: number
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericResponse'
+
+  /v1/addr/position:
+    get:
+      summary: Position to address (VWorld)
+      parameters:
+        - name: lng
+          in: query
+          required: true
+          schema:
+            type: number
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericResponse'
+
+  /v1/addr/geocode:
+    get:
+      summary: Address to coord
+      parameters:
+        - name: address
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: epsg
+          in: query
+          required: false
+          schema:
+            type: string
+            default: EPSG:4326
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericResponse'
+
+components:
+  schemas:
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+      required: [code, message]
+
+    HealthResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            data_dir:
+              type: string
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    AppConfigResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            min_required_version:
+              type: integer
+            latest_version:
+              type: integer
+            force_update:
+              type: boolean
+            message:
+              type: string
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    SimpleDataResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    DataCompressedResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            format:
+              type: string
+              enum: [compressed]
+            parts:
+              type: array
+              items:
+                type: string
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    DataLinesResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            format:
+              type: string
+              enum: [lines]
+            lines:
+              type: array
+              items:
+                type: string
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    DataBatchRequest:
+      type: object
+      properties:
+        format:
+          type: string
+          enum: [compressed, lines]
+          default: compressed
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              collection:
+                type: string
+              pnu:
+                type: string
+            required: [collection, pnu]
+      required: [items]
+
+    DataBatchResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: array
+          items:
+            type: object
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    TileDataResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            format:
+              type: string
+              enum: [compressed]
+            parts:
+              type: array
+              items:
+                type: string
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    TileBatchRequest:
+      type: object
+      properties:
+        tiles:
+          type: array
+          items:
+            type: object
+            properties:
+              root:
+                type: string
+              parent:
+                type: string
+              id:
+                type: string
+            required: [root, parent, id]
+      required: [tiles]
+
+    TileBatchResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: array
+          items:
+            type: object
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    PolygonRawResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            format:
+              type: string
+              enum: [raw]
+            payload:
+              type: string
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    PolygonPointsResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            format:
+              type: string
+              enum: [points]
+            landPolygon:
+              type: array
+              items:
+                type: array
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/LatLng'
+            buildingPolygon:
+              type: array
+              items:
+                type: array
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/LatLng'
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    PolygonListResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              polygonId:
+                type: string
+              points:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LatLng'
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    GeoFeature:
+      type: object
+      properties:
+        type:
+          type: string
+        properties:
+          type: object
+        geometry:
+          type: object
+
+    GeoFeatureResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/GeoFeature'
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    GeoFeatureListResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/GeoFeature'
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    ViolationResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          additionalProperties:
+            type: string
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    GeoPrefixRequest:
+      type: object
+      properties:
+        prefixes:
+          type: array
+          items:
+            type: string
+      required: [prefixes]
+
+    AddressSearchResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            documents:
+              type: array
+              items:
+                type: object
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    GenericResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    LatLng:
+      type: object
+      properties:
+        lat:
+          type: number
+        lng:
+          type: number
+      required: [lat, lng]

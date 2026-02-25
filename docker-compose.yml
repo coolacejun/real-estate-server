@@ -1,0 +1,111 @@
+services:
+  traefik:
+    image: traefik:v3.1
+    container_name: traefik
+    command:
+      - --api.dashboard=true
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --entrypoints.web.address=:80
+    ports:
+      - "80:80"
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    restart: unless-stopped
+    env_file: .env
+
+  api:
+    build: ./api
+    container_name: api
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - DATA_DIR=/data/uploads
+      - TILE_CACHE_DIR=/data/uploads/tile_cache
+      - CADASTRAL_TILE_VERSION=v1
+      - CADASTRAL_TILE_RENDER_REV=r13
+      - CADASTRAL_TILE_SIZE=512
+      - CADASTRAL_TILE_SUPERSAMPLE=4
+      - CADASTRAL_TILE_STROKE_WIDTH=0.6
+      - CADASTRAL_TILE_STROKE_ALPHA=160
+      - CADASTRAL_TILE_LABEL_ENABLED=true
+      - CADASTRAL_TILE_LABEL_MIN_ZOOM=17
+      - CADASTRAL_TILE_LABEL_MIN_BOX=6
+      - CADASTRAL_TILE_LABEL_MIN_FONT_PX=9
+      - CADASTRAL_TILE_LABEL_MAX_FONT_PX=30
+      - CADASTRAL_TILE_LABEL_STROKE_WIDTH=1.2
+      - CADASTRAL_TILE_LABEL_MIN_ZOOM_SCALE=0.45
+      - CADASTRAL_TILE_LABEL_MAX_ZOOM_SCALE=1.0
+      - CADASTRAL_TILE_DOWNSAMPLE_FILTER=bicubic
+      - CADASTRAL_TILE_PREFILTER_BLUR_RADIUS=0.35
+      - CADASTRAL_TILE_UNSHARP_RADIUS=0
+      - CADASTRAL_TILE_UNSHARP_PERCENT=0
+      - CADASTRAL_TILE_UNSHARP_THRESHOLD=0
+      - CADASTRAL_TILE_LABEL_FONT_PATH=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+      - CADASTRAL_TILE_MIN_ZOOM=17
+      - CADASTRAL_TILE_MAX_ZOOM=21
+      - CADASTRAL_TILE_MEMORY_CACHE_SIZE=512
+      - CADASTRAL_TILE_DB_LIMIT=6000
+      - CADASTRAL_TILE_TABLE=cadastral_features
+      - CADASTRAL_TILE_RELEASE_COL=release_id
+      - CADASTRAL_TILE_GEOJSON_COL=geojson
+      - CADASTRAL_TILE_LABEL_COL=label
+      - CADASTRAL_TILE_PNU_COL=pnu
+      - CADASTRAL_TILE_LABEL_LON_COL=label_lon
+      - CADASTRAL_TILE_LABEL_LAT_COL=label_lat
+      - CADASTRAL_IMPORT_LABEL_PRECISION=0.00002
+      - CADASTRAL_TILE_MIN_LON_COL=bbox_min_lon
+      - CADASTRAL_TILE_MAX_LON_COL=bbox_max_lon
+      - CADASTRAL_TILE_MIN_LAT_COL=bbox_min_lat
+      - CADASTRAL_TILE_MAX_LAT_COL=bbox_max_lat
+      - BUILDING_INFO_IMPORT_WORKERS=0
+      - IMPORT_BATCH_SIZE_BUILDING_INFO_FULL=12000
+      - IMPORT_BATCH_SIZE_BUILDING_INFO_UPDATE=4000
+      - DATASET_PAYLOAD_VALUES_COMPRESS_LAND_INFO=0
+      - LAND_INFO_STORE_SOURCE_METADATA=0
+    volumes:
+      - ./data/uploads:/data/uploads
+      - ./scripts:/scripts:ro
+      - ./연속지적:/data/uploads/연속지적:ro
+      - ./건축물정보:/data/source/building_info:ro
+      - ./건물통합정보:/data/source/building_integrated_info:ro
+      - ./토지정보:/data/source/land_info:ro
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    env_file: .env
+    # Large imports generate lots of WAL; increase WAL window to avoid excessive checkpoints.
+    command:
+      - postgres
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - min_wal_size=2GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+    volumes:
+      # Bind-mounting Postgres data on macOS can cause intermittent Permission denied / PANIC under heavy IO.
+      # Use a named volume for reliability/performance.
+      - pgdata:/var/lib/postgresql/data
+      # Auto-apply schema/migrations on first init of the volume.
+      - ./db:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    container_name: redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./data/redis:/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:

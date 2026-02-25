@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>서버 로그 확인</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --text: #1f2530;
+      --muted: #697386;
+      --line: #dce3ee;
+      --accent: #0b74de;
+      --ok: #0a7f3f;
+      --warn: #b7791f;
+      --danger: #d92d20;
+      --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+      line-height: 1.45;
+    }
+
+    .wrap {
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+    }
+
+    .subtitle {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    input, button {
+      font: inherit;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+
+    input {
+      min-width: 360px;
+    }
+
+    button {
+      cursor: pointer;
+      border-color: #cfd8e5;
+      background: #f8fafc;
+    }
+
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+      background: #f8fafc;
+    }
+
+    .badge.ok {
+      color: var(--ok);
+      border-color: #b9e2c8;
+      background: #ebf8f0;
+    }
+
+    .badge.warn {
+      color: var(--warn);
+      border-color: #f2d4a5;
+      background: #fff7e8;
+    }
+
+    .badge.danger {
+      color: var(--danger);
+      border-color: #f2b7b2;
+      background: #fff1f0;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .log {
+      margin-top: 12px;
+      height: calc(100vh - 220px);
+      min-height: 520px;
+      overflow: auto;
+      border-radius: 10px;
+      background: #0f172a;
+      color: #e2e8f0;
+      border: 1px solid #1f2a44;
+      padding: 10px;
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>서버 로그 확인</h1>
+    <div class="subtitle">이 창을 닫으면 로그 수신이 즉시 중단됩니다.</div>
+    <div class="row">
+      <label for="adminToken">관리자 토큰</label>
+      <input id="adminToken" type="password" placeholder="X-Admin-Token" />
+      <button id="saveToken" class="primary">토큰 저장</button>
+      <button id="connectBtn" class="primary">연결 시작</button>
+      <button id="disconnectBtn">연결 중지</button>
+      <button id="clearBtn">화면 지우기</button>
+      <span id="connState" class="badge">대기</span>
+    </div>
+    <div id="tokenState" class="muted" style="margin-top:8px;"></div>
+    <div id="logBox" class="log">서버 로그 대기 중...</div>
+  </div>
+</div>
+
+<script>
+  const state = {
+    token: localStorage.getItem('cadastral_admin_token') || '',
+    source: null,
+    reconnectTimer: null,
+    reconnectCount: 0,
+    shouldReconnect: true,
+    maxLines: 3000,
+  };
+
+  const el = {
+    adminToken: document.getElementById('adminToken'),
+    saveToken: document.getElementById('saveToken'),
+    connectBtn: document.getElementById('connectBtn'),
+    disconnectBtn: document.getElementById('disconnectBtn'),
+    clearBtn: document.getElementById('clearBtn'),
+    connState: document.getElementById('connState'),
+    tokenState: document.getElementById('tokenState'),
+    logBox: document.getElementById('logBox'),
+  };
+
+  function setConnBadge(label, klass) {
+    el.connState.textContent = label;
+    el.connState.className = `badge ${klass || ''}`.trim();
+  }
+
+  function appendLog(text) {
+    const lines = el.logBox.textContent ? el.logBox.textContent.split('\n') : [];
+    lines.push(text);
+    if (lines.length > state.maxLines) {
+      lines.splice(0, lines.length - state.maxLines);
+    }
+    el.logBox.textContent = lines.join('\n');
+    el.logBox.scrollTop = el.logBox.scrollHeight;
+  }
+
+  function appendSystem(message) {
+    const ts = new Date().toLocaleString();
+    appendLog(`[${ts}] [viewer] ${message}`);
+  }
+
+  function syncAdminTokenCookie() {
+    if (state.token) {
+      document.cookie = `cadastral_admin_token=${encodeURIComponent(state.token)}; path=/; SameSite=Lax`;
+      return;
+    }
+    document.cookie = 'cadastral_admin_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';
+  }
+
+  function setTokenState() {
+    el.adminToken.value = state.token;
+    el.tokenState.textContent = state.token
+      ? '토큰 저장됨. 서버 로그 스트림 인증에 사용됩니다.'
+      : '토큰 미설정. 서버의 ADMIN_TOKEN이 설정되어 있으면 연결이 거절됩니다.';
+  }
+
+  function serverLogEventsUrl() {
+    const params = new URLSearchParams();
+    params.set('interval_ms', '1200');
+    params.set('tail_lines', '150');
+    return `/v1/admin/server-logs/events?${params.toString()}`;
+  }
+
+  function closeSource() {
+    if (state.source) {
+      state.source.close();
+      state.source = null;
+    }
+  }
+
+  function stopReconnect() {
+    if (!state.reconnectTimer) return;
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
+
+  function scheduleReconnect() {
+    if (!state.shouldReconnect || state.reconnectTimer) return;
+    const waitMs = Math.min(15000, 2000 + state.reconnectCount * 1000);
+    state.reconnectTimer = setTimeout(() => {
+      state.reconnectTimer = null;
+      connect();
+    }, waitMs);
+  }
+
+  function connect() {
+    if (state.source) return;
+
+    syncAdminTokenCookie();
+    const source = new EventSource(serverLogEventsUrl());
+    state.source = source;
+    setConnBadge('연결 시도', 'warn');
+
+    source.addEventListener('open', () => {
+      if (state.source !== source) return;
+      state.reconnectCount = 0;
+      setConnBadge('연결됨', 'ok');
+      appendSystem('서버 로그 연결됨');
+    });
+
+    source.addEventListener('line', (event) => {
+      if (state.source !== source) return;
+      try {
+        const payload = JSON.parse(event.data || '{}');
+        appendLog(String(payload.line || ''));
+      } catch (err) {
+        appendSystem(`로그 파싱 실패: ${err.message || err}`);
+      }
+    });
+
+    source.addEventListener('error', () => {
+      if (state.source !== source) return;
+      closeSource();
+      state.reconnectCount += 1;
+      setConnBadge('재연결 대기', 'warn');
+      appendSystem('연결이 끊어져 재연결 시도');
+      scheduleReconnect();
+    });
+  }
+
+  function disconnect(manual) {
+    stopReconnect();
+    closeSource();
+    if (manual) state.shouldReconnect = false;
+    setConnBadge('중지됨', 'danger');
+    appendSystem('연결 종료');
+  }
+
+  el.saveToken.addEventListener('click', () => {
+    state.token = el.adminToken.value.trim();
+    localStorage.setItem('cadastral_admin_token', state.token);
+    syncAdminTokenCookie();
+    setTokenState();
+    appendSystem('토큰 저장 완료');
+  });
+
+  el.connectBtn.addEventListener('click', () => {
+    state.shouldReconnect = true;
+    state.reconnectCount = 0;
+    connect();
+  });
+
+  el.disconnectBtn.addEventListener('click', () => disconnect(true));
+
+  el.clearBtn.addEventListener('click', () => {
+    el.logBox.textContent = '';
+    appendSystem('화면 지움');
+  });
+
+  window.addEventListener('beforeunload', () => {
+    state.shouldReconnect = false;
+    stopReconnect();
+    closeSource();
+  });
+
+  setTokenState();
+  syncAdminTokenCookie();
+  connect();
+</script>
+</body>
+</html>

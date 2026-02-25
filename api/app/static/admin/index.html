@@ -1,0 +1,2322 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>지적 데이터 관리자</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --text: #1f2530;
+      --muted: #697386;
+      --line: #dce3ee;
+      --accent: #0b74de;
+      --accent-soft: #e8f2fe;
+      --ok: #0a7f3f;
+      --warn: #b7791f;
+      --danger: #d92d20;
+      --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+      line-height: 1.45;
+    }
+
+    .wrap {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      letter-spacing: -0.2px;
+    }
+
+    .subtitle {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .grid {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+
+    .span-12 { grid-column: span 12; }
+    .span-8 { grid-column: span 8; }
+    .span-6 { grid-column: span 6; }
+    .span-4 { grid-column: span 4; }
+
+    .card h2 {
+      margin: 0 0 10px;
+      font-size: 16px;
+    }
+
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .row + .row { margin-top: 8px; }
+
+    input, select, textarea, button {
+      font: inherit;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+
+    input[type="text"], input[type="password"], input[type="number"], textarea {
+      min-width: 160px;
+    }
+
+    textarea {
+      min-height: 72px;
+      resize: vertical;
+      line-height: 1.35;
+      white-space: pre-wrap;
+    }
+
+    .w-300 { min-width: 300px !important; }
+    .w-420 { min-width: 420px !important; }
+
+    button {
+      cursor: pointer;
+      background: #f8fafc;
+      border-color: #cfd8e5;
+    }
+
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    button.danger {
+      background: #fff1f0;
+      border-color: #f2b7b2;
+      color: var(--danger);
+    }
+
+    button.ghost {
+      background: #fff;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .guide {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .guide-item {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      background: #fff;
+    }
+
+    .step-badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--accent);
+      background: var(--accent-soft);
+      border: 1px solid #c9e0ff;
+      border-radius: 999px;
+      padding: 2px 7px;
+      margin-bottom: 6px;
+    }
+
+    .guide-title {
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .guide-desc {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .status {
+      display: inline-block;
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: #f8fafc;
+    }
+
+    .status.active {
+      color: var(--ok);
+      border-color: #b9e2c8;
+      background: #ebf8f0;
+    }
+
+    .status.failed {
+      color: var(--danger);
+      border-color: #f2b7b2;
+      background: #fff1f0;
+    }
+
+    .status.running {
+      color: var(--warn);
+      border-color: #f2d4a5;
+      background: #fff7e8;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .summary-box {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      background: #fff;
+      min-height: 74px;
+    }
+
+    .summary-title {
+      margin: 0 0 3px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .summary-value {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      word-break: break-all;
+    }
+
+    .next-action {
+      margin-top: 8px;
+      border: 1px dashed #9dc2f4;
+      background: #f0f7ff;
+      border-radius: 10px;
+      padding: 10px;
+      font-size: 13px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      padding: 8px 6px;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 700;
+      background: #fafcff;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    .table-wrap {
+      max-height: 360px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+
+    .log {
+      min-height: 260px;
+      max-height: 520px;
+      overflow: auto;
+      white-space: pre-wrap;
+      border-radius: 10px;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 10px;
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .inline-help {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    @media (max-width: 1200px) {
+      .guide { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .span-8, .span-6, .span-4, .span-12 { grid-column: span 12; }
+      .w-420, .w-300 { min-width: 200px !important; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>지적 데이터 관리자</h1>
+  <div class="subtitle">서버 경로 적재 전용: 전체 업로드 / 업데이트(추가·수정·삭제 컬럼) 모드 지원</div>
+
+  <div class="grid">
+    <section class="card span-12">
+      <h2>접속 설정</h2>
+      <div class="row">
+        <label for="adminToken">관리자 토큰</label>
+        <input id="adminToken" type="password" class="w-420" placeholder="X-Admin-Token" />
+        <button id="saveToken" class="primary">토큰 저장</button>
+        <button id="reloadAll" class="ghost">전체 새로고침</button>
+        <button id="openLogViewer" class="ghost">로그 확인</button>
+      </div>
+      <div id="tokenState" class="muted" style="margin-top:8px;"></div>
+    </section>
+
+    <section class="card span-12">
+      <h2>현재 상태 요약</h2>
+      <div class="summary-grid">
+        <div class="summary-box">
+          <p class="summary-title">타일 버전</p>
+          <p id="summaryTileVersion" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">활성 Release</p>
+          <p id="summaryActiveRelease" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">마지막 Job</p>
+          <p id="summaryLastJob" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">레코드 수</p>
+          <p id="summaryRecords" class="summary-value mono">-</p>
+        </div>
+      </div>
+      <div id="nextAction" class="next-action">다음 작업 계산 중...</div>
+      <div class="inline-help" style="margin-top:8px;">상태 뱃지: <span class="status">PENDING/READY</span> <span class="status running">RUNNING/IMPORTING</span> <span class="status active">ACTIVE/SUCCEEDED</span> <span class="status failed">FAILED</span></div>
+    </section>
+
+    <section class="card span-12">
+      <div class="row" style="justify-content:space-between;">
+        <h2 style="margin:0;">데이터 크기 / 상태</h2>
+        <button id="refreshStorage" class="ghost">새로고침</button>
+      </div>
+      <div class="summary-grid" style="margin-top:8px;">
+        <div class="summary-box">
+          <p class="summary-title">DB 크기</p>
+          <p id="storageDbSize" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">dataset_pnu_kv</p>
+          <p id="storageKvTableSize" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">dataset_record (활성 partition 합)</p>
+          <p id="storageRecordTotal" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">측정 시각</p>
+          <p id="storageMeasuredAt" class="summary-value mono">-</p>
+        </div>
+      </div>
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+          <tr>
+            <th>Type</th>
+            <th>Active Release</th>
+            <th>Status</th>
+            <th>Records</th>
+            <th>Storage</th>
+            <th>KV Payload (logical)</th>
+          </tr>
+          </thead>
+          <tbody id="storageRows"></tbody>
+        </table>
+      </div>
+      <details style="margin-top:10px;">
+        <summary class="muted">상세 테이블 크기 (top)</summary>
+        <div class="table-wrap" style="margin-top:8px;">
+          <table>
+            <thead>
+            <tr>
+              <th>Table</th>
+              <th>Total</th>
+              <th>Table</th>
+              <th>Indexes</th>
+              <th>TOAST</th>
+            </tr>
+            </thead>
+            <tbody id="storageTableRows"></tbody>
+          </table>
+        </div>
+      </details>
+      <div class="inline-help" style="margin-top:8px;">
+        참고: <span class="mono">pnu_kv</span>는 물리 용량이 한 테이블(<span class="mono">dataset_pnu_kv</span>)에 섞여 저장되므로, 유형별 물리 용량 분해가 제한적입니다.
+        대신 KV는 payload 컬럼의 “논리 크기(sum(pg_column_size))”를 표시합니다.
+      </div>
+    </section>
+
+    <section class="card span-12">
+      <div class="row" style="justify-content:space-between;">
+        <h2 style="margin:0;">앱 업데이트 정책</h2>
+        <button id="refreshAppVersionConfig" class="ghost">새로고침</button>
+      </div>
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+          <tr>
+            <th>플랫폼</th>
+            <th>min_required_version</th>
+            <th>latest_version</th>
+            <th>force_update</th>
+            <th>title</th>
+            <th>message</th>
+            <th>updated_at</th>
+            <th>저장</th>
+          </tr>
+          </thead>
+          <tbody>
+          <tr>
+            <td class="mono">android</td>
+            <td><input id="appCfgAndroidMin" type="number" min="0" step="1" placeholder="0" /></td>
+            <td><input id="appCfgAndroidLatest" type="number" min="0" step="1" placeholder="0" /></td>
+            <td><input id="appCfgAndroidForce" type="checkbox" /></td>
+            <td><input id="appCfgAndroidTitle" type="text" placeholder="업데이트 필요" /></td>
+            <td><textarea id="appCfgAndroidMessage" class="w-420" placeholder="업데이트 안내 문구"></textarea></td>
+            <td id="appCfgAndroidUpdatedAt" class="mono">-</td>
+            <td><button id="saveAppCfgAndroid" class="primary">저장</button></td>
+          </tr>
+          <tr>
+            <td class="mono">ios</td>
+            <td><input id="appCfgIosMin" type="number" min="0" step="1" placeholder="0" /></td>
+            <td><input id="appCfgIosLatest" type="number" min="0" step="1" placeholder="0" /></td>
+            <td><input id="appCfgIosForce" type="checkbox" /></td>
+            <td><input id="appCfgIosTitle" type="text" placeholder="업데이트 필요" /></td>
+            <td><textarea id="appCfgIosMessage" class="w-420" placeholder="업데이트 안내 문구"></textarea></td>
+            <td id="appCfgIosUpdatedAt" class="mono">-</td>
+            <td><button id="saveAppCfgIos" class="primary">저장</button></td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="inline-help" style="margin-top:8px;">
+        앱에서 비교하는 기준은 각 플랫폼의 앱 buildNumber입니다. <span class="mono">latest_version</span>은
+        <span class="mono">min_required_version</span> 이상이어야 합니다.
+      </div>
+    </section>
+
+    <section class="card span-12">
+      <h2>유형별 적재 실행 (서버 경로 전용)</h2>
+      <div class="row">
+        <select id="simpleUploadDataType">
+          <option value="cadastral">연속지적</option>
+          <option value="building_info">건축물정보</option>
+          <option value="building_integrated_info">건물통합정보</option>
+          <option value="land_info">토지정보</option>
+        </select>
+        <select id="operationMode">
+          <option value="full">전체 업로드</option>
+          <option value="update">업데이트 (추가/수정/삭제)</option>
+        </select>
+      </div>
+      <div class="row">
+        <input id="simpleUploadVersion" placeholder="version (전체 업로드: 신규 release 버전, 업데이트: 활성 release 사용)" />
+        <input id="simpleUploadSourceName" class="w-300" placeholder="source_name (선택)" />
+      </div>
+      <div class="row">
+        <button id="serverImportRun" class="primary">적재 시작</button>
+      </div>
+      <div class="inline-help">서버 경로는 데이터 유형/모드 기준으로 자동 지정됩니다.</div>
+      <div class="inline-help">자동 경로: <span id="autoSourcePath" class="mono">-</span></div>
+      <div class="inline-help">전체 업로드는 새 데이터 적재 완료 후 이전 데이터를 자동 정리합니다.</div>
+      <div id="uiLockNotice" class="inline-help" style="display:none; color: var(--danger); margin-top:6px;"></div>
+      <div class="inline-help">업데이트 모드에서는 입력 데이터의 추가/수정/삭제 컬럼을 기준으로 변경분만 반영됩니다.</div>
+    </section>
+
+    <section class="card span-12">
+      <div class="row" style="justify-content:space-between;">
+        <h2 style="margin:0;">업데이트 결과 요약</h2>
+        <button id="refreshUpdateSummary" class="ghost">새로고침</button>
+      </div>
+      <div class="summary-grid" style="margin-top:8px;">
+        <div class="summary-box">
+          <p class="summary-title">최신 업데이트 상태</p>
+          <p id="updateSummaryStatus" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">최신 업데이트 Job</p>
+          <p id="updateSummaryJob" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">대상 Release</p>
+          <p id="updateSummaryTarget" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">파일 진행</p>
+          <p id="updateSummaryProgress" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">반영 Rows (upsert)</p>
+          <p id="updateSummaryRows" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">워커 요약</p>
+          <p id="updateSummaryWorkers" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">소요시간</p>
+          <p id="updateSummaryDuration" class="summary-value mono">-</p>
+        </div>
+        <div class="summary-box">
+          <p class="summary-title">완료/갱신 시각</p>
+          <p id="updateSummaryFinishedAt" class="summary-value mono">-</p>
+        </div>
+      </div>
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+          <tr>
+            <th>Job</th>
+            <th>Type</th>
+            <th>Release</th>
+            <th>Status</th>
+            <th>Files</th>
+            <th>Rows</th>
+            <th>Duration</th>
+            <th>Finished</th>
+            <th>Error</th>
+          </tr>
+          </thead>
+          <tbody id="updateResultRows"></tbody>
+        </table>
+      </div>
+      <div class="inline-help" style="margin-top:8px;">
+        업데이트 모드(update) 실행분만 집계합니다. <span class="mono">rows</span> 값은 upsert 기준이며 삭제 건수는 별도 집계되지 않습니다.
+      </div>
+
+      <div class="row" style="justify-content:space-between; margin-top:12px;">
+        <h2 style="margin:0; font-size:14px;">최근 업데이트 파일 목록</h2>
+        <button id="refreshUpdateFiles" class="ghost">파일목록 새로고침</button>
+      </div>
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+          <tr>
+            <th>Recorded</th>
+            <th>Type</th>
+            <th>Release</th>
+            <th>File</th>
+            <th>Size</th>
+            <th>Release Status</th>
+          </tr>
+          </thead>
+          <tbody id="updateFileRows"></tbody>
+        </table>
+      </div>
+      <div class="inline-help" style="margin-top:8px;">
+        동일 파일은 첫 반영 시 1회만 기록됩니다. 이후 같은 파일로 update 요청 시 자동 스킵됩니다.
+      </div>
+    </section>
+
+    <section class="card span-12">
+      <h2>데이터 유형 클리어 (완전삭제)</h2>
+      <div class="row">
+        <button class="danger" data-action="clear-data-type" data-data-type="cadastral">연속지적 클리어</button>
+        <button class="danger" data-action="clear-data-type" data-data-type="building_info">건축물정보 클리어</button>
+        <button class="danger" data-action="clear-data-type" data-data-type="building_integrated_info">건물통합정보 클리어</button>
+        <button class="danger" data-action="clear-data-type" data-data-type="land_info">토지정보 클리어</button>
+      </div>
+      <div class="inline-help">선택한 유형의 release/job/레코드를 모두 삭제합니다. 진행 중 job이 있으면 먼저 취소 후 삭제합니다.</div>
+    </section>
+
+    <section class="card span-12">
+      <div class="row" style="justify-content:space-between;">
+        <h2 style="margin:0;">Release 목록</h2>
+        <button id="refreshReleases" class="ghost">새로고침</button>
+      </div>
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+          <tr>
+            <th>ID</th>
+            <th>Type</th>
+            <th>Version</th>
+            <th>Status</th>
+            <th>Active</th>
+            <th>Records</th>
+            <th>Source</th>
+            <th>Activated</th>
+          </tr>
+          </thead>
+          <tbody id="releaseRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card span-12">
+      <div class="row" style="justify-content:space-between;">
+        <h2 style="margin:0;">Import Job 목록</h2>
+        <button id="refreshJobs" class="ghost">새로고침</button>
+      </div>
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+          <tr>
+            <th>ID</th>
+            <th>Release</th>
+            <th>Status</th>
+            <th>Progress</th>
+            <th>Source</th>
+            <th>Error</th>
+            <th>Action</th>
+          </tr>
+          </thead>
+          <tbody id="jobRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card span-12">
+      <div class="row" style="justify-content:space-between;">
+        <h2 style="margin:0;">병렬 작업 진행 (파일별)</h2>
+        <button id="refreshWorkers" class="ghost">새로고침</button>
+      </div>
+      <div class="table-wrap" style="margin-top:8px;">
+        <table>
+          <thead>
+          <tr>
+            <th>Job</th>
+            <th>Type</th>
+            <th>Source File</th>
+            <th>Worker</th>
+            <th>Status</th>
+            <th>Rows</th>
+            <th>Updated</th>
+            <th>Error</th>
+          </tr>
+          </thead>
+          <tbody id="workerRows"></tbody>
+        </table>
+      </div>
+      <div class="inline-help">전체 업로드 병렬 모드에서 파일 단위 진행률이 표시됩니다.</div>
+    </section>
+
+    <section class="card span-12">
+      <h2>작업 로그</h2>
+      <div id="console" class="log">준비됨.</div>
+    </section>
+  </div>
+</div>
+
+<script>
+  const state = {
+    token: localStorage.getItem('cadastral_admin_token') || '',
+    tileConfig: null,
+    storageSummary: null,
+    appVersionConfig: null,
+    releases: [],
+    jobs: [],
+    jobWorkers: [],
+    updateFiles: [],
+    monitorTimer: null,
+    monitorBusy: false,
+    lastMonitorErrorAt: 0,
+    monitorTickCount: 0,
+    summaryKey: '',
+    eventSource: null,
+    sseConnected: false,
+    sseReconnectTimer: null,
+    sseRetryCount: 0,
+    uploadInFlight: false,
+    uiLocked: false,
+  };
+
+  const el = {
+    adminToken: document.getElementById('adminToken'),
+    saveTokenBtn: document.getElementById('saveToken'),
+    reloadAllBtn: document.getElementById('reloadAll'),
+    openLogViewerBtn: document.getElementById('openLogViewer'),
+    tokenState: document.getElementById('tokenState'),
+    console: document.getElementById('console'),
+
+    releaseRows: document.getElementById('releaseRows'),
+
+    jobRows: document.getElementById('jobRows'),
+    workerRows: document.getElementById('workerRows'),
+
+    summaryTileVersion: document.getElementById('summaryTileVersion'),
+    summaryActiveRelease: document.getElementById('summaryActiveRelease'),
+    summaryLastJob: document.getElementById('summaryLastJob'),
+    summaryRecords: document.getElementById('summaryRecords'),
+    nextAction: document.getElementById('nextAction'),
+
+    refreshUpdateSummaryBtn: document.getElementById('refreshUpdateSummary'),
+    updateSummaryStatus: document.getElementById('updateSummaryStatus'),
+    updateSummaryJob: document.getElementById('updateSummaryJob'),
+    updateSummaryTarget: document.getElementById('updateSummaryTarget'),
+    updateSummaryProgress: document.getElementById('updateSummaryProgress'),
+    updateSummaryRows: document.getElementById('updateSummaryRows'),
+    updateSummaryWorkers: document.getElementById('updateSummaryWorkers'),
+    updateSummaryDuration: document.getElementById('updateSummaryDuration'),
+    updateSummaryFinishedAt: document.getElementById('updateSummaryFinishedAt'),
+    updateResultRows: document.getElementById('updateResultRows'),
+    updateFileRows: document.getElementById('updateFileRows'),
+    refreshUpdateFilesBtn: document.getElementById('refreshUpdateFiles'),
+
+    refreshStorageBtn: document.getElementById('refreshStorage'),
+    storageDbSize: document.getElementById('storageDbSize'),
+    storageKvTableSize: document.getElementById('storageKvTableSize'),
+    storageRecordTotal: document.getElementById('storageRecordTotal'),
+    storageMeasuredAt: document.getElementById('storageMeasuredAt'),
+    storageRows: document.getElementById('storageRows'),
+    storageTableRows: document.getElementById('storageTableRows'),
+    refreshAppVersionConfigBtn: document.getElementById('refreshAppVersionConfig'),
+    appCfgAndroidMin: document.getElementById('appCfgAndroidMin'),
+    appCfgAndroidLatest: document.getElementById('appCfgAndroidLatest'),
+    appCfgAndroidForce: document.getElementById('appCfgAndroidForce'),
+    appCfgAndroidTitle: document.getElementById('appCfgAndroidTitle'),
+    appCfgAndroidMessage: document.getElementById('appCfgAndroidMessage'),
+    appCfgAndroidUpdatedAt: document.getElementById('appCfgAndroidUpdatedAt'),
+    saveAppCfgAndroidBtn: document.getElementById('saveAppCfgAndroid'),
+    appCfgIosMin: document.getElementById('appCfgIosMin'),
+    appCfgIosLatest: document.getElementById('appCfgIosLatest'),
+    appCfgIosForce: document.getElementById('appCfgIosForce'),
+    appCfgIosTitle: document.getElementById('appCfgIosTitle'),
+    appCfgIosMessage: document.getElementById('appCfgIosMessage'),
+    appCfgIosUpdatedAt: document.getElementById('appCfgIosUpdatedAt'),
+    saveAppCfgIosBtn: document.getElementById('saveAppCfgIos'),
+
+    simpleUploadDataType: document.getElementById('simpleUploadDataType'),
+    operationMode: document.getElementById('operationMode'),
+    simpleUploadVersion: document.getElementById('simpleUploadVersion'),
+    simpleUploadSourceName: document.getElementById('simpleUploadSourceName'),
+    autoSourcePath: document.getElementById('autoSourcePath'),
+    serverImportRun: document.getElementById('serverImportRun'),
+    clearDataTypeButtons: Array.from(document.querySelectorAll('button[data-action="clear-data-type"]')),
+    refreshReleasesBtn: document.getElementById('refreshReleases'),
+    refreshJobsBtn: document.getElementById('refreshJobs'),
+    refreshWorkersBtn: document.getElementById('refreshWorkers'),
+    uiLockNotice: document.getElementById('uiLockNotice'),
+  };
+
+  function dataTypeLabel(dataType) {
+    switch ((dataType || '').trim().toLowerCase()) {
+      case 'building_info':
+        return '건축물정보';
+      case 'building_integrated_info':
+        return '건물통합정보';
+      case 'land_info':
+        return '토지정보';
+      case 'cadastral':
+      default:
+        return '연속지적';
+    }
+  }
+
+  function defaultServerPathByType(dataType, operationMode = 'full') {
+    const mode = (operationMode || 'full').trim().toLowerCase() === 'update' ? 'update' : 'full';
+    switch ((dataType || '').trim().toLowerCase()) {
+      case 'building_info':
+        return `/data/source/building_info/${mode}`;
+      case 'building_integrated_info':
+        return `/data/source/building_integrated_info/${mode}`;
+      case 'land_info':
+        return `/data/source/land_info/${mode}`;
+      case 'cadastral':
+      default:
+        return `/data/uploads/연속지적/${mode}`;
+    }
+  }
+
+  function currentAutoSourcePath() {
+    const dataType = (el.simpleUploadDataType && el.simpleUploadDataType.value
+      ? el.simpleUploadDataType.value
+      : 'cadastral')
+      .trim()
+      .toLowerCase()
+      .replace(/-/g, '_');
+    const operationMode = (el.operationMode && el.operationMode.value
+      ? el.operationMode.value
+      : 'full')
+      .trim()
+      .toLowerCase() === 'update' ? 'update' : 'full';
+    return defaultServerPathByType(dataType, operationMode);
+  }
+
+  function updateAutoSourcePathUi() {
+    if (el.autoSourcePath) {
+      el.autoSourcePath.textContent = currentAutoSourcePath();
+    }
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function formatBytes(bytes) {
+    const b = Number(bytes);
+    if (!Number.isFinite(b) || b < 0) return '-';
+    if (b === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    let value = b;
+    let idx = 0;
+    while (value >= 1024 && idx < units.length - 1) {
+      value /= 1024;
+      idx += 1;
+    }
+    const digits = idx === 0 ? 0 : (value >= 100 ? 0 : (value >= 10 ? 1 : 2));
+    return `${value.toFixed(digits)} ${units[idx]}`;
+  }
+
+  function formatIsoToLocale(value) {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString();
+  }
+
+  function parseIsoMs(value) {
+    if (!value) return null;
+    const date = new Date(value);
+    const ms = date.getTime();
+    return Number.isNaN(ms) ? null : ms;
+  }
+
+  function formatDurationMs(ms) {
+    const totalSeconds = Math.floor(Number(ms) / 1000);
+    if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return '-';
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  }
+
+  function jobDurationText(job) {
+    const startMs = parseIsoMs(job && (job.started_at || job.created_at));
+    if (startMs == null) return '-';
+    const status = String((job && job.status) || '').toUpperCase();
+    let endMs = parseIsoMs(job && job.finished_at);
+    if (endMs == null && status === 'RUNNING') endMs = Date.now();
+    if (endMs == null) endMs = parseIsoMs(job && job.updated_at);
+    if (endMs == null) return '-';
+    return formatDurationMs(Math.max(0, endMs - startMs));
+  }
+
+  function log(message) {
+    const ts = new Date().toLocaleString();
+    el.console.textContent = `[${ts}] ${message}\n` + el.console.textContent;
+  }
+
+  function headers(withJson = true) {
+    const result = {};
+    if (withJson) result['Content-Type'] = 'application/json';
+    if (state.token) result['X-Admin-Token'] = state.token;
+    return result;
+  }
+
+  function adminEventsUrl() {
+    const params = new URLSearchParams();
+    params.set('release_limit', '100');
+    params.set('job_limit', '200');
+    params.set('worker_limit', '600');
+    params.set('interval_ms', '2500');
+    return `/v1/admin/cadastral/events?${params.toString()}`;
+  }
+
+  function syncAdminTokenCookie() {
+    if (state.token) {
+      document.cookie = `cadastral_admin_token=${encodeURIComponent(state.token)}; path=/; SameSite=Lax`;
+      return;
+    }
+    document.cookie = 'cadastral_admin_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';
+  }
+
+  function statusClass(status, isActive = false) {
+    if (isActive || status === 'ACTIVE' || status === 'SUCCEEDED') return 'status active';
+    if (status === 'RUNNING' || status === 'IMPORTING') return 'status running';
+    if (status === 'FAILED') return 'status failed';
+    return 'status';
+  }
+
+  function rowFromHtml(html) {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = html.trim();
+    return tpl.content.firstElementChild;
+  }
+
+  function releaseRowKey(r) {
+    return [
+      r.id,
+      r.data_type || 'cadastral',
+      r.version,
+      r.status,
+      r.is_active ? 1 : 0,
+      r.records_count ?? 0,
+      r.source_name || '',
+      r.activated_at || '',
+    ].join('|');
+  }
+
+  function jobRowKey(j) {
+    return [
+      j.id,
+      j.release_id,
+      j.release_version || '',
+      j.status,
+      j.processed_files || 0,
+      j.total_files || 0,
+      j.inserted_rows || 0,
+      j.source_path || '',
+      j.error_message || '',
+    ].join('|');
+  }
+
+  function workerRowKey(w) {
+    return [
+      w.id,
+      w.job_id,
+      w.status || '',
+      w.worker_name || '',
+      w.processed_rows || 0,
+      w.updated_at || '',
+      w.error_message || '',
+    ].join('|');
+  }
+
+  function releaseRowHtml(r) {
+    const activatedAt = r.activated_at ? new Date(r.activated_at).toLocaleString() : '-';
+    return `
+      <tr data-row-id="${Number(r.id)}" data-render-key="${escapeHtml(releaseRowKey(r))}">
+        <td class="mono">${escapeHtml(r.id)}</td>
+        <td class="mono">${escapeHtml(r.data_type || 'cadastral')}</td>
+        <td class="mono">${escapeHtml(r.version)}</td>
+        <td><span class="${statusClass(r.status, r.is_active)}">${escapeHtml(r.status)}</span></td>
+        <td>${r.is_active ? 'Y' : '-'}</td>
+        <td class="mono">${escapeHtml(r.records_count ?? 0)}</td>
+        <td>${escapeHtml(r.source_name || '-')}</td>
+        <td>${escapeHtml(activatedAt)}</td>
+      </tr>
+    `;
+  }
+
+  function jobRowHtml(j) {
+    const progress = `${j.processed_files || 0}/${j.total_files || 0}, rows ${j.inserted_rows || 0}`;
+    const canCancel = isJobCancelableStatus(j.status);
+    return `
+      <tr data-row-id="${Number(j.id)}" data-render-key="${escapeHtml(jobRowKey(j))}">
+        <td class="mono">${escapeHtml(j.id)}</td>
+        <td>${escapeHtml(j.release_id)} <span class="muted">(${escapeHtml(j.release_version || '-')})</span></td>
+        <td><span class="${statusClass(j.status)}">${escapeHtml(j.status)}</span></td>
+        <td class="mono">${escapeHtml(progress)}</td>
+        <td class="mono">${escapeHtml(j.source_path || '-')}</td>
+        <td>${escapeHtml(j.error_message || '-')}</td>
+        <td>
+          <button
+            type="button"
+            class="danger"
+            data-action="cancel-job"
+            data-job-id="${Number(j.id)}"
+            data-job-status="${escapeHtml(j.status || '')}"
+            ${canCancel ? '' : 'disabled'}
+          >취소</button>
+        </td>
+      </tr>
+    `;
+  }
+
+  function workerRowHtml(w) {
+    const updatedAt = w.updated_at ? new Date(w.updated_at).toLocaleString() : '-';
+    return `
+      <tr data-row-id="${Number(w.id)}" data-render-key="${escapeHtml(workerRowKey(w))}">
+        <td class="mono">${escapeHtml(w.job_id)}</td>
+        <td class="mono">${escapeHtml(w.data_type || '-')}</td>
+        <td class="mono">${escapeHtml(w.source_file || '-')}</td>
+        <td class="mono">${escapeHtml(w.worker_name || '-')}</td>
+        <td><span class="${statusClass(w.status)}">${escapeHtml(w.status || '-')}</span></td>
+        <td class="mono">${escapeHtml(w.processed_rows || 0)}</td>
+        <td>${escapeHtml(updatedAt)}</td>
+        <td>${escapeHtml(w.error_message || '-')}</td>
+      </tr>
+    `;
+  }
+
+  function updateFileRowKey(item) {
+    return [
+      item.id,
+      item.release_id || 0,
+      item.data_type || '',
+      item.file_name || '',
+      item.file_size || 0,
+      item.created_at || '',
+      item.release_status || '',
+      item.release_is_active ? 1 : 0,
+    ].join('|');
+  }
+
+  function updateFileRowHtml(item) {
+    const releaseText = item && item.release_id != null
+      ? `${item.release_id} (${item.release_version || '-'})`
+      : '-';
+    const recordedAt = formatIsoToLocale(item && item.created_at);
+    const fileSize = formatBytes(item && item.file_size);
+    return `
+      <tr data-row-id="${Number(item.id)}" data-render-key="${escapeHtml(updateFileRowKey(item))}">
+        <td class="mono">${escapeHtml(recordedAt)}</td>
+        <td>${escapeHtml(dataTypeLabel(item.data_type))} <span class="muted mono">(${escapeHtml(item.data_type || '-')})</span></td>
+        <td class="mono">${escapeHtml(releaseText)}</td>
+        <td class="mono">${escapeHtml(item.file_name || '-')}</td>
+        <td class="mono">${escapeHtml(fileSize)}</td>
+        <td><span class="${statusClass(item.release_status, item.release_is_active)}">${escapeHtml(item.release_status || '-')}</span></td>
+      </tr>
+    `;
+  }
+
+  function patchTableRows(tbody, rows, rowKeyFn, rowHtmlFn) {
+    if (!tbody) return;
+
+    function normalizeCursor(node) {
+      if (!node) return null;
+      return node.parentNode === tbody ? node : null;
+    }
+
+    const existing = new Map();
+    Array.from(tbody.querySelectorAll('tr[data-row-id]')).forEach((tr) => {
+      existing.set(Number(tr.dataset.rowId), tr);
+    });
+
+    const seen = new Set();
+    let cursor = tbody.firstElementChild;
+
+    for (const row of rows) {
+      const id = Number(row.id);
+      const key = rowKeyFn(row);
+      seen.add(id);
+
+      let tr = existing.get(id);
+      if (!tr) {
+        tr = rowFromHtml(rowHtmlFn(row));
+        cursor = normalizeCursor(cursor);
+        if (cursor) {
+          tbody.insertBefore(tr, cursor);
+        } else {
+          tbody.appendChild(tr);
+        }
+      } else {
+        if (tr.dataset.renderKey !== key) {
+          const wasCursor = tr === cursor;
+          const nextTr = rowFromHtml(rowHtmlFn(row));
+          tbody.replaceChild(nextTr, tr);
+          tr = nextTr;
+          if (wasCursor) {
+            cursor = tr;
+          }
+        }
+        cursor = normalizeCursor(cursor);
+        if (tr !== cursor) {
+          if (cursor) {
+            tbody.insertBefore(tr, cursor);
+          } else {
+            tbody.appendChild(tr);
+          }
+        }
+      }
+      cursor = tr.nextElementSibling;
+    }
+
+    Array.from(tbody.querySelectorAll('tr[data-row-id]')).forEach((tr) => {
+      if (!seen.has(Number(tr.dataset.rowId))) {
+        tr.remove();
+      }
+    });
+  }
+
+  function releaseLookupById(releases) {
+    const map = new Map();
+    (Array.isArray(releases) ? releases : []).forEach((release) => {
+      const id = Number(release && release.id);
+      if (!Number.isFinite(id) || id <= 0) return;
+      map.set(id, release || {});
+    });
+    return map;
+  }
+
+  function normalizeOperationMode(mode) {
+    const text = String(mode || '').trim().toLowerCase();
+    if (text === 'update') return 'update';
+    if (text === 'full') return 'full';
+    return '';
+  }
+
+  function releaseOperationMode(release) {
+    const metadata = release && release.metadata;
+    if (metadata && typeof metadata === 'object') {
+      const mode = normalizeOperationMode(metadata.operation_mode);
+      if (mode) return mode;
+    }
+    if (typeof metadata === 'string') {
+      try {
+        const parsed = JSON.parse(metadata);
+        const mode = normalizeOperationMode(parsed && parsed.operation_mode);
+        if (mode) return mode;
+      } catch (_) {
+        return '';
+      }
+    }
+    return '';
+  }
+
+  function detectJobOperationMode(job, releasesById) {
+    const release = releasesById.get(Number(job && job.release_id));
+    const releaseMode = releaseOperationMode(release);
+    if (releaseMode) return releaseMode;
+    const sourcePath = String((job && job.source_path) || '').toLowerCase();
+    if (sourcePath.includes('/update')) return 'update';
+    if (sourcePath.includes('/full')) return 'full';
+    return '';
+  }
+
+  function renderUpdateResultSummary() {
+    if (!el.updateResultRows) return;
+
+    const setText = (node, value) => {
+      if (node) node.textContent = value;
+    };
+    const setStatus = (node, status) => {
+      if (!node) return;
+      if (!status) {
+        node.textContent = '-';
+        return;
+      }
+      node.innerHTML = `<span class="${statusClass(status)}">${escapeHtml(status)}</span>`;
+    };
+
+    const releasesById = releaseLookupById(state.releases);
+    const updateRows = (Array.isArray(state.jobs) ? state.jobs : [])
+      .map((job) => {
+        const release = releasesById.get(Number(job && job.release_id)) || null;
+        const mode = detectJobOperationMode(job, releasesById);
+        return { job, release, mode };
+      })
+      .filter((item) => item.mode === 'update')
+      .sort((a, b) => Number(b.job.id || 0) - Number(a.job.id || 0));
+
+    if (updateRows.length < 1) {
+      setStatus(el.updateSummaryStatus, '');
+      setText(el.updateSummaryJob, '-');
+      setText(el.updateSummaryTarget, '-');
+      setText(el.updateSummaryProgress, '-');
+      setText(el.updateSummaryRows, '-');
+      setText(el.updateSummaryWorkers, '-');
+      setText(el.updateSummaryDuration, '-');
+      setText(el.updateSummaryFinishedAt, '-');
+      el.updateResultRows.innerHTML = `
+        <tr>
+          <td colspan="9" class="muted">업데이트 이력이 없습니다.</td>
+        </tr>
+      `;
+      return;
+    }
+
+    const latest = updateRows[0];
+    const latestJob = latest.job || {};
+    const latestRelease = latest.release || {};
+    const latestWorkers = (Array.isArray(state.jobWorkers) ? state.jobWorkers : [])
+      .filter((worker) => Number(worker && worker.job_id) === Number(latestJob.id));
+    const workerTotal = latestWorkers.length;
+    const workerSucceeded = latestWorkers.filter((worker) => String(worker && worker.status) === 'SUCCEEDED').length;
+    const workerFailed = latestWorkers.filter((worker) => String(worker && worker.status) === 'FAILED').length;
+    const workerRunning = latestWorkers.filter((worker) => String(worker && worker.status) === 'RUNNING').length;
+
+    setStatus(el.updateSummaryStatus, String(latestJob.status || '-'));
+    setText(el.updateSummaryJob, String(latestJob.id || '-'));
+    setText(
+      el.updateSummaryTarget,
+      `${dataTypeLabel(latestJob.data_type)} / release ${latestJob.release_id || '-'} (${latestRelease.version || latestJob.release_version || '-'})`
+    );
+    setText(el.updateSummaryProgress, `${latestJob.processed_files || 0}/${latestJob.total_files || 0}`);
+    setText(el.updateSummaryRows, String(latestJob.inserted_rows || 0));
+    setText(
+      el.updateSummaryWorkers,
+      workerTotal > 0
+        ? `${workerTotal}개 (완료 ${workerSucceeded}, 실패 ${workerFailed}, 진행 ${workerRunning})`
+        : '-'
+    );
+    setText(el.updateSummaryDuration, jobDurationText(latestJob));
+    setText(el.updateSummaryFinishedAt, formatIsoToLocale(latestJob.finished_at || latestJob.updated_at || latestJob.started_at));
+
+    el.updateResultRows.innerHTML = updateRows.slice(0, 20).map(({ job, release }) => {
+      const releaseVersion = (release && release.version) || job.release_version || '-';
+      const files = `${job.processed_files || 0}/${job.total_files || 0}`;
+      const finishedAt = formatIsoToLocale(job.finished_at || job.updated_at || job.started_at);
+      return `
+        <tr>
+          <td class="mono">${escapeHtml(job.id)}</td>
+          <td>${escapeHtml(dataTypeLabel(job.data_type))} <span class="muted mono">(${escapeHtml(job.data_type || '-')})</span></td>
+          <td class="mono">${escapeHtml(job.release_id)} <span class="muted">(${escapeHtml(releaseVersion)})</span></td>
+          <td><span class="${statusClass(job.status)}">${escapeHtml(job.status || '-')}</span></td>
+          <td class="mono">${escapeHtml(files)}</td>
+          <td class="mono">${escapeHtml(job.inserted_rows || 0)}</td>
+          <td class="mono">${escapeHtml(jobDurationText(job))}</td>
+          <td>${escapeHtml(finishedAt)}</td>
+          <td>${escapeHtml(job.error_message || '-')}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function renderUpdateFileList() {
+    if (!el.updateFileRows) return;
+    const rows = Array.isArray(state.updateFiles) ? state.updateFiles : [];
+    if (rows.length < 1) {
+      el.updateFileRows.innerHTML = `
+        <tr>
+          <td colspan="6" class="muted">업데이트 파일 기록이 없습니다.</td>
+        </tr>
+      `;
+      return;
+    }
+    Array.from(el.updateFileRows.querySelectorAll('tr:not([data-row-id])')).forEach((tr) => tr.remove());
+    patchTableRows(el.updateFileRows, rows, updateFileRowKey, updateFileRowHtml);
+  }
+
+  function isJobRunningStatus(status) {
+    return status === 'RUNNING';
+  }
+
+  function isJobOpenStatus(status) {
+    return status === 'RUNNING' || status === 'QUEUED';
+  }
+
+  function isJobCancelableStatus(status) {
+    return status === 'RUNNING' || status === 'QUEUED';
+  }
+
+  function storagePartsHtml(parts) {
+    const list = Array.isArray(parts) ? parts : [];
+    if (list.length === 0) return '-';
+    return list
+      .map((p) => `${escapeHtml(p.name)}: ${escapeHtml(formatBytes(p.total_bytes))}`)
+      .join('<br>');
+  }
+
+  function renderStorageSummary() {
+    const summary = state.storageSummary;
+    if (!el.storageRows) return;
+
+    if (!summary) {
+      if (el.storageDbSize) el.storageDbSize.textContent = '-';
+      if (el.storageKvTableSize) el.storageKvTableSize.textContent = '-';
+      if (el.storageRecordTotal) el.storageRecordTotal.textContent = '-';
+      if (el.storageMeasuredAt) el.storageMeasuredAt.textContent = '-';
+      el.storageRows.innerHTML = '';
+      if (el.storageTableRows) el.storageTableRows.innerHTML = '';
+      return;
+    }
+
+    const dbSize = summary.db && summary.db.size_bytes != null ? formatBytes(summary.db.size_bytes) : '-';
+    if (el.storageDbSize) el.storageDbSize.textContent = dbSize;
+
+    const tracked = Array.isArray(summary.tracked_tables) ? summary.tracked_tables : [];
+    const kvTable = tracked.find((t) => String(t.name || '') === 'dataset_pnu_kv');
+    if (el.storageKvTableSize) el.storageKvTableSize.textContent = kvTable ? formatBytes(kvTable.total_bytes) : '-';
+
+    const recordTotalBytes = tracked
+      .filter((t) => String(t.name || '').startsWith('dataset_record_r'))
+      .reduce((acc, t) => acc + Number(t.total_bytes || 0), 0);
+    if (el.storageRecordTotal) el.storageRecordTotal.textContent = formatBytes(recordTotalBytes);
+
+    if (el.storageMeasuredAt) el.storageMeasuredAt.textContent = formatIsoToLocale(summary.measured_at);
+
+    const typeRows = Array.isArray(summary.data_types) ? summary.data_types : [];
+    el.storageRows.innerHTML = typeRows.map((item) => {
+      const dataType = String(item.data_type || '').trim().toLowerCase();
+      const release = item.active_release || {};
+      const releaseId = release.id != null ? String(release.id) : '';
+      const version = release.version != null ? String(release.version) : '';
+      const status = release.status != null ? String(release.status) : '';
+      const isActive = !!release.is_active;
+      const records = release.records_count != null ? release.records_count : 0;
+
+      const totalText = formatBytes(item.storage_total_bytes || 0);
+      const partsHtml = storagePartsHtml(item.storage_parts);
+      const storageHtml = partsHtml === '-'
+        ? '-'
+        : `${escapeHtml(totalText)}<div class=\"muted\" style=\"margin-top:4px;\">${partsHtml}</div>`;
+
+      const kv = item.kv_logical;
+      const kvText = kv
+        ? `${formatBytes(kv.payload_bytes || 0)} (rows ${kv.rows || 0})`
+        : '-';
+
+      const releaseText = releaseId
+        ? `${escapeHtml(releaseId)} <span class=\"muted\">(${escapeHtml(version || '-')})</span>`
+        : '-';
+
+      return `
+        <tr>
+          <td>${escapeHtml(dataTypeLabel(dataType))} <span class="muted mono">(${escapeHtml(dataType)})</span></td>
+          <td class="mono">${releaseText}</td>
+          <td><span class="${statusClass(status, isActive)}">${escapeHtml(status || '-')}</span></td>
+          <td class="mono">${escapeHtml(records)}</td>
+          <td class="mono">${storageHtml}</td>
+          <td class="mono">${escapeHtml(kvText)}</td>
+        </tr>
+      `;
+    }).join('');
+
+    const top = Array.isArray(summary.top_tables) ? summary.top_tables : [];
+    if (el.storageTableRows) {
+      el.storageTableRows.innerHTML = top.map((t) => `
+        <tr>
+          <td class="mono">${escapeHtml(t.name)}</td>
+          <td class="mono">${escapeHtml(formatBytes(t.total_bytes))}</td>
+          <td class="mono">${escapeHtml(formatBytes(t.table_bytes))}</td>
+          <td class="mono">${escapeHtml(formatBytes(t.indexes_bytes))}</td>
+          <td class="mono">${escapeHtml(formatBytes(t.toast_bytes))}</td>
+        </tr>
+      `).join('');
+    }
+  }
+
+  function toNonNegativeInt(value) {
+    const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      throw new Error('숫자 필드는 0 이상의 정수여야 합니다.');
+    }
+    return parsed;
+  }
+
+  function renderAppVersionConfig() {
+    const config = state.appVersionConfig || {};
+    const applyPlatform = (platform, nodes) => {
+      const item = config && typeof config === 'object' && config[platform] ? config[platform] : {};
+      if (nodes.min) nodes.min.value = String(item.min_required_version ?? 0);
+      if (nodes.latest) nodes.latest.value = String(item.latest_version ?? 0);
+      if (nodes.force) nodes.force.checked = !!item.force_update;
+      if (nodes.title) nodes.title.value = String(item.title || '');
+      if (nodes.message) nodes.message.value = String(item.message || '');
+      if (nodes.updatedAt) nodes.updatedAt.textContent = formatIsoToLocale(item.updated_at);
+    };
+
+    applyPlatform('android', {
+      min: el.appCfgAndroidMin,
+      latest: el.appCfgAndroidLatest,
+      force: el.appCfgAndroidForce,
+      title: el.appCfgAndroidTitle,
+      message: el.appCfgAndroidMessage,
+      updatedAt: el.appCfgAndroidUpdatedAt,
+    });
+    applyPlatform('ios', {
+      min: el.appCfgIosMin,
+      latest: el.appCfgIosLatest,
+      force: el.appCfgIosForce,
+      title: el.appCfgIosTitle,
+      message: el.appCfgIosMessage,
+      updatedAt: el.appCfgIosUpdatedAt,
+    });
+  }
+
+  async function loadAppVersionConfig(silent = false) {
+    try {
+      const data = await api('/v1/admin/app-config', { method: 'GET' });
+      state.appVersionConfig = data && typeof data === 'object' ? data : {};
+      renderAppVersionConfig();
+      if (!silent) log('앱 업데이트 정책 조회 완료');
+    } catch (e) {
+      state.appVersionConfig = {};
+      renderAppVersionConfig();
+      if (!silent) log(`앱 업데이트 정책 조회 실패: ${e.message || e}`);
+    }
+  }
+
+  function payloadFromUpdatePolicyForm(platform) {
+    const isAndroid = String(platform || '').toLowerCase() === 'android';
+    const minInput = isAndroid ? el.appCfgAndroidMin : el.appCfgIosMin;
+    const latestInput = isAndroid ? el.appCfgAndroidLatest : el.appCfgIosLatest;
+    const forceInput = isAndroid ? el.appCfgAndroidForce : el.appCfgIosForce;
+    const titleInput = isAndroid ? el.appCfgAndroidTitle : el.appCfgIosTitle;
+    const messageInput = isAndroid ? el.appCfgAndroidMessage : el.appCfgIosMessage;
+
+    const minRequiredVersion = toNonNegativeInt(minInput && minInput.value);
+    const latestVersion = toNonNegativeInt(latestInput && latestInput.value);
+    if (latestVersion < minRequiredVersion) {
+      throw new Error('latest_version은 min_required_version 이상이어야 합니다.');
+    }
+
+    return {
+      min_required_version: minRequiredVersion,
+      latest_version: latestVersion,
+      force_update: !!(forceInput && forceInput.checked),
+      title: String((titleInput && titleInput.value) || '').trim(),
+      message: String((messageInput && messageInput.value) || '').trim(),
+    };
+  }
+
+  async function saveUpdatePolicyConfig(platform) {
+    const normalized = String(platform || '').trim().toLowerCase();
+    if (normalized !== 'android' && normalized !== 'ios') {
+      return;
+    }
+
+    let body;
+    try {
+      body = payloadFromUpdatePolicyForm(normalized);
+    } catch (e) {
+      const message = e && e.message ? e.message : String(e);
+      log(`앱 업데이트 정책 입력 오류: ${message}`);
+      alert(message);
+      return;
+    }
+
+    try {
+      const updated = await api(`/v1/admin/app-config/${encodeURIComponent(normalized)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+      if (!state.appVersionConfig || typeof state.appVersionConfig !== 'object') {
+        state.appVersionConfig = {};
+      }
+      state.appVersionConfig[normalized] = updated;
+      renderAppVersionConfig();
+      log(`앱 업데이트 정책 저장 완료: ${normalized} (min=${updated.min_required_version}, latest=${updated.latest_version}, force=${updated.force_update ? 'Y' : 'N'})`);
+    } catch (e) {
+      const message = e && e.message ? e.message : String(e);
+      log(`앱 업데이트 정책 저장 실패(${normalized}): ${message}`);
+      alert(`앱 업데이트 정책 저장 실패: ${message}`);
+    }
+  }
+
+  async function loadStorageSummary(silent = false) {
+    if (!el.storageRows) return;
+    try {
+      state.storageSummary = await api('/v1/admin/cadastral/storage-summary', { method: 'GET' });
+      renderStorageSummary();
+      if (!silent) log('storage summary 조회 완료');
+    } catch (e) {
+      state.storageSummary = null;
+      renderStorageSummary();
+      if (!silent) log(`storage summary 조회 실패: ${e.message}`);
+    }
+  }
+
+  function updateUiLockState() {
+    const openJobs = (state.jobs || []).filter((j) => isJobOpenStatus(j.status));
+    const shouldLock = state.uploadInFlight || openJobs.length > 0;
+    state.uiLocked = shouldLock;
+
+    const lockTargets = [
+      el.adminToken,
+      el.saveTokenBtn,
+      el.reloadAllBtn,
+      el.refreshStorageBtn,
+      el.refreshAppVersionConfigBtn,
+      el.appCfgAndroidMin,
+      el.appCfgAndroidLatest,
+      el.appCfgAndroidForce,
+      el.appCfgAndroidTitle,
+      el.appCfgAndroidMessage,
+      el.saveAppCfgAndroidBtn,
+      el.appCfgIosMin,
+      el.appCfgIosLatest,
+      el.appCfgIosForce,
+      el.appCfgIosTitle,
+      el.appCfgIosMessage,
+      el.saveAppCfgIosBtn,
+      el.simpleUploadDataType,
+      el.operationMode,
+      el.simpleUploadVersion,
+      el.simpleUploadSourceName,
+      el.serverImportRun,
+      ...(el.clearDataTypeButtons || []),
+      el.refreshReleasesBtn,
+      el.refreshJobsBtn,
+      el.refreshWorkersBtn,
+      el.refreshUpdateSummaryBtn,
+      el.refreshUpdateFilesBtn,
+    ];
+
+    lockTargets.forEach((node) => {
+      if (node) node.disabled = shouldLock;
+    });
+
+    if (el.uiLockNotice) {
+      if (shouldLock) {
+        const jobSummary = openJobs.length
+          ? openJobs.map((j) => `${j.id}:${j.status}`).join(', ')
+          : '-';
+        el.uiLockNotice.style.display = 'block';
+        el.uiLockNotice.textContent =
+          `적재 진행 중에는 입력이 잠깁니다. 취소만 가능합니다. (open jobs: ${jobSummary})`;
+      } else {
+        el.uiLockNotice.style.display = 'none';
+        el.uiLockNotice.textContent = '';
+      }
+    }
+
+    if (el.jobRows) {
+      Array.from(el.jobRows.querySelectorAll('button[data-action="cancel-job"]')).forEach((btn) => {
+        const status = btn.dataset.jobStatus || '';
+        btn.disabled = !isJobCancelableStatus(status);
+      });
+    }
+  }
+
+  function autoRefreshDelayMs() {
+    const hasRunning = state.jobs.some((j) => isJobRunningStatus(j.status));
+    return hasRunning ? 3000 : 12000;
+  }
+
+  function pct(processed, total) {
+    if (!total || total <= 0) return '-';
+    return `${Math.min(100, Math.floor((processed / total) * 100))}%`;
+  }
+
+  function snapshotJob(job) {
+    return {
+      id: Number(job.id),
+      status: String(job.status || ''),
+      processed: Number(job.processed_files || 0),
+      total: Number(job.total_files || 0),
+      rows: Number(job.inserted_rows || 0),
+      error: String(job.error_message || ''),
+    };
+  }
+
+  function snapshotRelease(release) {
+    return {
+      id: Number(release.id),
+      status: String(release.status || ''),
+      isActive: !!release.is_active,
+      records: Number(release.records_count || 0),
+      version: String(release.version || ''),
+    };
+  }
+
+  function jobMap(list) {
+    const m = new Map();
+    (list || []).forEach((j) => {
+      m.set(Number(j.id), snapshotJob(j));
+    });
+    return m;
+  }
+
+  function releaseMap(list) {
+    const m = new Map();
+    (list || []).forEach((r) => {
+      m.set(Number(r.id), snapshotRelease(r));
+    });
+    return m;
+  }
+
+  function workerMap(list) {
+    const m = new Map();
+    (list || []).forEach((w) => {
+      m.set(Number(w.id), {
+        id: Number(w.id),
+        jobId: Number(w.job_id || 0),
+        status: String(w.status || ''),
+        rows: Number(w.processed_rows || 0),
+        workerName: String(w.worker_name || ''),
+        file: String(w.source_file || ''),
+      });
+    });
+    return m;
+  }
+
+  function logJobChanges(prevMap, nextMap) {
+    let changed = false;
+    for (const [id, next] of nextMap.entries()) {
+      const prev = prevMap.get(id);
+      if (!prev) {
+        log(`job ${id} 생성됨: status=${next.status}`);
+        changed = true;
+        continue;
+      }
+
+      if (prev.status !== next.status) {
+        log(`job ${id} 상태 변경: ${prev.status} -> ${next.status}`);
+        changed = true;
+        if (next.status === 'SUCCEEDED') {
+          log(`job ${id} 완료: rows ${next.rows}`);
+        }
+        if (next.status === 'FAILED') {
+          log(`job ${id} 실패: ${next.error || '오류 메시지 없음'}`);
+        }
+        continue;
+      }
+
+      if (next.status === 'RUNNING') {
+        const processedChanged = next.processed !== prev.processed;
+        const rowsBucketChanged = Math.floor(next.rows / 5000) !== Math.floor(prev.rows / 5000);
+        if (processedChanged || rowsBucketChanged) {
+          log(`job ${id} 진행: files ${next.processed}/${next.total} (${pct(next.processed, next.total)}), rows ${next.rows}`);
+          changed = true;
+        }
+      }
+    }
+    for (const id of prevMap.keys()) {
+      if (!nextMap.has(id)) changed = true;
+    }
+    return changed;
+  }
+
+  function logReleaseChanges(prevMap, nextMap) {
+    let changed = false;
+    for (const [id, next] of nextMap.entries()) {
+      const prev = prevMap.get(id);
+      if (!prev) {
+        changed = true;
+        continue;
+      }
+      if (prev.status !== next.status) {
+        log(`release ${id} 상태 변경: ${prev.status} -> ${next.status}`);
+        changed = true;
+      }
+      if (!prev.isActive && next.isActive) {
+        log(`release ${id} 활성화됨 (${next.version})`);
+        changed = true;
+      }
+    }
+    for (const id of prevMap.keys()) {
+      if (!nextMap.has(id)) changed = true;
+    }
+    return changed;
+  }
+
+  function logWorkerChanges(prevMap, nextMap) {
+    let changed = false;
+    for (const [id, next] of nextMap.entries()) {
+      const prev = prevMap.get(id);
+      if (!prev) {
+        if (next.status === 'RUNNING') {
+          log(`worker ${id} 시작: job=${next.jobId}, file=${next.file}, worker=${next.workerName || '-'}`);
+        }
+        changed = true;
+        continue;
+      }
+      if (prev.status !== next.status) {
+        log(`worker ${id} 상태 변경: ${prev.status} -> ${next.status} (${next.file})`);
+        changed = true;
+        continue;
+      }
+      const prevBucket = Math.floor(prev.rows / 5000);
+      const nextBucket = Math.floor(next.rows / 5000);
+      if (next.status === 'RUNNING' && prevBucket !== nextBucket) {
+        log(`worker ${id} 진행: file=${next.file}, rows=${next.rows}`);
+        changed = true;
+      }
+    }
+    for (const id of prevMap.keys()) {
+      if (!nextMap.has(id)) changed = true;
+    }
+    return changed;
+  }
+
+  function normalizeApiErrorDetail(rawText) {
+    const text = String(rawText || '').trim();
+    if (!text) return '';
+    const lowered = text.toLowerCase();
+    if (lowered.startsWith('<!doctype html') || lowered.startsWith('<html')) {
+      const codeMatch = text.match(/Error code\s+(\d{3,4})/i);
+      const titleMatch = text.match(/<title>([^<]+)<\/title>/i);
+      if (codeMatch && codeMatch[1] === '524') {
+        return 'Cloudflare 524 timeout (origin 서버 응답 지연)';
+      }
+      if (titleMatch && titleMatch[1]) {
+        return `HTML 오류 응답: ${titleMatch[1].trim()}`;
+      }
+      if (codeMatch && codeMatch[1]) {
+        return `HTML 오류 응답 (code ${codeMatch[1]})`;
+      }
+      return 'HTML 오류 응답';
+    }
+    return text;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+  }
+
+  async function api(path, options = {}) {
+    const req = {
+      ...options,
+      headers: {
+        ...headers(options.body !== undefined),
+        ...(options.headers || {}),
+      },
+    };
+
+    const res = await fetch(path, req);
+    const text = await res.text();
+
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (_) {
+      parsed = { detail: normalizeApiErrorDetail(text) };
+    }
+
+    if (!res.ok || parsed.ok === false) {
+      throw new Error(parsed.detail || parsed.error || `HTTP ${res.status}`);
+    }
+
+    return parsed.data;
+  }
+
+  async function waitForClearDataTypeCompletion(normalizedType, targetJobId) {
+    const maxPollCount = 900; // 30분(2초 간격)
+    let transientErrors = 0;
+
+    for (let pollCount = 1; pollCount <= maxPollCount; pollCount += 1) {
+      await sleep(2000);
+
+      let status;
+      try {
+        status = await api(`/v1/admin/cadastral/data-types/${encodeURIComponent(normalizedType)}/clear-status`, {
+          method: 'GET',
+        });
+        transientErrors = 0;
+      } catch (e) {
+        transientErrors += 1;
+        if (transientErrors >= 5) {
+          throw new Error(`클리어 상태 조회 실패: ${e.message || e}`);
+        }
+        continue;
+      }
+
+      if (!status || typeof status !== 'object') continue;
+
+      const statusJobId = Number(status.job_id || 0);
+      if (targetJobId > 0 && statusJobId > 0 && statusJobId !== targetJobId) {
+        continue;
+      }
+
+      const stateValue = String(status.status || '').toUpperCase();
+      if (stateValue === 'RUNNING' || stateValue === 'IDLE') {
+        continue;
+      }
+      if (stateValue === 'SUCCEEDED') {
+        return status.result || {};
+      }
+      if (stateValue === 'FAILED') {
+        throw new Error(status.error_message || '클리어 작업 실패');
+      }
+
+      throw new Error(`알 수 없는 클리어 상태: ${stateValue || '(empty)'}`);
+    }
+
+    throw new Error('클리어 상태 확인 시간 초과');
+  }
+
+  async function runImportFromServerPath() {
+    if (state.uiLocked) {
+      const reason = '적재 진행 중에는 취소만 가능합니다.';
+      log(reason);
+      alert(reason);
+      return;
+    }
+
+    const dataType = (el.simpleUploadDataType.value || 'cadastral').trim().toLowerCase().replace(/-/g, '_');
+    const operationMode = (el.operationMode && el.operationMode.value ? el.operationMode.value : 'full')
+      .trim()
+      .toLowerCase() === 'update' ? 'update' : 'full';
+    const sourcePath = currentAutoSourcePath();
+
+    const version = el.simpleUploadVersion.value.trim();
+    const sourceName = el.simpleUploadSourceName.value.trim();
+    const body = {
+      data_type: dataType,
+      operation_mode: operationMode === 'update' ? 'update' : 'full',
+      source_path: sourcePath,
+      mark_ready: true,
+    };
+    if (version) body.version = version;
+    if (sourceName) body.source_name = sourceName;
+
+    state.uploadInFlight = true;
+    updateUiLockState();
+    try {
+      log(`서버 경로 적재 시작: 유형=${dataType}, 모드=${body.operation_mode}, 경로=${sourcePath}`);
+      const data = await api('/v1/admin/cadastral/import-from-path', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      log(`적재 시작 완료: release ${data.release_id}(${data.release_version}), job ${data.job_id}, mode=${data.operation_mode || body.operation_mode}`);
+      log(`적재 대상 ${data.total_files}개, pattern=${data.pattern}, source=${data.source_path}`);
+      if ((data.operation_mode || body.operation_mode) === 'full') {
+        log('전체 업로드: 새 release 적재 완료 후 이전 release를 자동 삭제합니다.');
+      }
+      if ((data.operation_mode || body.operation_mode) === 'update') {
+        log('업데이트 모드: 추가/수정/삭제 컬럼을 기준으로 변경분을 반영합니다.');
+      }
+      if ((data.operation_mode || body.operation_mode) === 'full') {
+        const run = data.run || {};
+        const dataTypeText = dataTypeLabel(dataType);
+        const parallelEligible = !!run.parallel_import_enabled;
+        if (parallelEligible) {
+          const workersMode = run.parallel_workers_mode || 'auto';
+          const workersText = workersMode === 'fixed'
+            ? `고정 ${run.parallel_workers || 1}개`
+            : '자동(히스토리/CPU 기준)';
+          const batchText = run.batch_size || '-';
+          log(`성능 모드: ${dataTypeText} 전체 업로드는 병렬 처리 + COPY 적재로 실행됩니다. workers=${workersText}, batch_size=${batchText}`);
+        } else {
+          log(`성능 모드: ${dataTypeText} 전체 업로드 병렬 처리 조건이 충족되지 않아 단일 경로로 실행됩니다.`);
+        }
+      }
+      await reloadAll();
+      scheduleMonitor(1000);
+    } catch (e) {
+      const message = `서버 경로 적재 실패: ${e.message || e}`;
+      log(message);
+      alert(message);
+    } finally {
+      state.uploadInFlight = false;
+      updateUiLockState();
+    }
+  }
+
+  async function clearDataType(dataType) {
+    const normalizedType = (dataType || '').trim().toLowerCase().replace(/-/g, '_');
+    if (!normalizedType) return;
+
+    if (state.uiLocked) {
+      const reason = '적재 진행 중에는 취소만 가능합니다.';
+      log(reason);
+      alert(reason);
+      return;
+    }
+
+    const label = dataTypeLabel(normalizedType);
+    const okDelete = confirm(
+      `[${label}] 데이터를 완전삭제합니다.\n` +
+      '- release / import job / 데이터 레코드가 모두 삭제됩니다.\n' +
+      '- 업로드 임시 파일도 함께 삭제됩니다.\n' +
+      '계속할까요?'
+    );
+    if (!okDelete) return;
+
+    state.uploadInFlight = true;
+    updateUiLockState();
+    try {
+      log(`${label} 클리어 시작`);
+      const data = await api(`/v1/admin/cadastral/data-types/${encodeURIComponent(normalizedType)}/clear?background=true`, {
+        method: 'POST',
+        body: JSON.stringify({ confirm: true }),
+      });
+
+      const hasImmediateResult = (
+        data != null
+        && (
+          data.deleted_releases !== undefined
+          || data.deleted_jobs !== undefined
+          || Array.isArray(data.deleted_release_ids)
+        )
+      );
+      let result = data || {};
+      if (!hasImmediateResult) {
+        const jobId = Number(result.job_id || 0);
+        if (result.already_running) {
+          log(`${label} 기존 클리어 작업 추적: job=${jobId || '-'}`);
+        } else {
+          log(`${label} 클리어 작업 시작: job=${jobId || '-'}`);
+        }
+        result = await waitForClearDataTypeCompletion(normalizedType, jobId);
+      }
+
+      log(
+        `${label} 클리어 완료: releases=${result.deleted_releases || 0}, jobs=${result.deleted_jobs || 0}, ` +
+        `running_cancelled=${(result.cancelled_open_job_ids || []).length}`
+      );
+      if (Array.isArray(result.cleanup_errors) && result.cleanup_errors.length > 0) {
+        log(`${label} 클리어 후처리 경고: ${result.cleanup_errors.join(' | ')}`);
+      }
+      await reloadAll();
+      scheduleMonitor(1000);
+    } catch (e) {
+      const message = `${label} 클리어 실패: ${e.message || e}`;
+      log(message);
+      alert(message);
+    } finally {
+      state.uploadInFlight = false;
+      updateUiLockState();
+    }
+  }
+
+  async function cancelImportJob(jobId) {
+    if (!Number.isFinite(jobId) || jobId <= 0) return;
+    const ok = confirm(`job ${jobId}를 취소할까요?`);
+    if (!ok) return;
+
+    try {
+      await api(`/v1/admin/cadastral/import-jobs/${jobId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          status: 'CANCELLED',
+          error_message: 'cancelled by admin ui',
+        }),
+      });
+      log(`job ${jobId} 취소 요청 완료`);
+      await reloadAll();
+      scheduleMonitor(1000);
+    } catch (e) {
+      log(`job ${jobId} 취소 실패: ${e.message || e}`);
+    }
+  }
+
+  function setTokenState() {
+    el.adminToken.value = state.token;
+    el.tokenState.textContent = state.token
+      ? '토큰 저장됨. 관리 API 헤더(X-Admin-Token)와 실시간 상태(SSE 쿠키 인증)에 사용됩니다.'
+      : '토큰 미설정. 서버의 ADMIN_TOKEN이 설정되어 있으면 요청이 거절됩니다.';
+  }
+
+  function updateSummary() {
+    const tile = state.tileConfig;
+    const releases = state.releases;
+    const jobs = state.jobs;
+    updateUiLockState();
+    renderUpdateResultSummary();
+    renderUpdateFileList();
+
+    const activeRelease =
+      releases.find((r) => r.is_active && r.data_type === 'cadastral')
+      || releases.find((r) => r.is_active);
+    const lastJob = jobs[0];
+
+    el.summaryTileVersion.textContent = tile ? String(tile.version || '-') : '-';
+    el.summaryActiveRelease.textContent = activeRelease
+      ? `${activeRelease.id} (${activeRelease.version})`
+      : '-';
+    el.summaryLastJob.textContent = lastJob
+      ? `${lastJob.id} (${lastJob.status})`
+      : '-';
+    el.summaryRecords.textContent = activeRelease
+      ? String(activeRelease.records_count ?? 0)
+      : '-';
+
+    let next = '데이터 업로드 대기';
+    if (lastJob && lastJob.status === 'RUNNING') {
+      next = `job ${lastJob.id} 처리 중`;
+    } else if (lastJob && lastJob.status === 'FAILED') {
+      next = `job ${lastJob.id} 실패 원인 확인 필요`;
+    } else if (activeRelease && (activeRelease.records_count || 0) > 0) {
+      next = `운영 중: release ${activeRelease.id} (${activeRelease.version})`;
+    } else if (releases.length > 0) {
+      next = '활성화 가능한 데이터 없음';
+    }
+
+    const summaryKey = JSON.stringify({
+      tile: tile ? tile.version : null,
+      active: activeRelease ? `${activeRelease.id}:${activeRelease.version}:${activeRelease.records_count}` : null,
+      lastJob: lastJob ? `${lastJob.id}:${lastJob.status}:${lastJob.processed_files || 0}:${lastJob.inserted_rows || 0}` : null,
+      next,
+    });
+    if (state.summaryKey === summaryKey) return;
+    state.summaryKey = summaryKey;
+
+    el.nextAction.textContent = `다음 작업: ${next}`;
+  }
+
+  async function loadTileConfig(silent = false) {
+    try {
+      state.tileConfig = await api('/v1/tile-config', { method: 'GET' });
+    } catch (e) {
+      state.tileConfig = null;
+      if (!silent) log(`tile-config 조회 실패: ${e.message}`);
+    }
+  }
+
+  async function loadReleases(silent = false) {
+    try {
+      const rows = await api('/v1/admin/cadastral/releases?limit=100', { method: 'GET' });
+      state.releases = Array.isArray(rows) ? rows : [];
+
+      patchTableRows(el.releaseRows, state.releases, releaseRowKey, releaseRowHtml);
+
+      if (!silent) log(`release ${state.releases.length}건 조회`);
+    } catch (e) {
+      state.releases = [];
+      el.releaseRows.innerHTML = '';
+      if (!silent) log(`release 조회 실패: ${e.message}`);
+    }
+  }
+
+  async function loadJobs(silent = false) {
+    try {
+      const rows = await api('/v1/admin/cadastral/import-jobs?limit=200', { method: 'GET' });
+      state.jobs = Array.isArray(rows) ? rows : [];
+
+      patchTableRows(el.jobRows, state.jobs, jobRowKey, jobRowHtml);
+
+      if (!silent) log(`job ${state.jobs.length}건 조회`);
+    } catch (e) {
+      state.jobs = [];
+      el.jobRows.innerHTML = '';
+      if (!silent) log(`job 조회 실패: ${e.message}`);
+    }
+  }
+
+  async function loadJobWorkers(silent = false) {
+    try {
+      const rows = await api('/v1/admin/cadastral/import-job-workers?limit=600&active_only=true', { method: 'GET' });
+      state.jobWorkers = Array.isArray(rows) ? rows : [];
+      patchTableRows(el.workerRows, state.jobWorkers, workerRowKey, workerRowHtml);
+      if (!silent) log(`worker ${state.jobWorkers.length}건 조회`);
+    } catch (e) {
+      state.jobWorkers = [];
+      if (el.workerRows) el.workerRows.innerHTML = '';
+      if (!silent) log(`worker 조회 실패: ${e.message}`);
+    }
+  }
+
+  async function loadUpdateFiles(silent = false) {
+    try {
+      const rows = await api('/v1/admin/cadastral/update-files?limit=200', { method: 'GET' });
+      state.updateFiles = Array.isArray(rows) ? rows : [];
+      renderUpdateFileList();
+      if (!silent) log(`update file ${state.updateFiles.length}건 조회`);
+    } catch (e) {
+      state.updateFiles = [];
+      if (el.updateFileRows) {
+        el.updateFileRows.innerHTML = `
+          <tr>
+            <td colspan="6" class="muted">업데이트 파일 조회 실패: ${escapeHtml(e.message || e)}</td>
+          </tr>
+        `;
+      }
+      if (!silent) log(`update file 조회 실패: ${e.message}`);
+    }
+  }
+
+  async function reloadAll() {
+    await Promise.all([
+      loadTileConfig(),
+      loadStorageSummary(true),
+      loadAppVersionConfig(true),
+      loadReleases(),
+      loadJobs(),
+      loadJobWorkers(),
+      loadUpdateFiles(true),
+    ]);
+    updateSummary();
+  }
+
+  function applySnapshot(snapshot) {
+    const prevJobs = jobMap(state.jobs);
+    const prevReleases = releaseMap(state.releases);
+    const prevWorkers = workerMap(state.jobWorkers);
+
+    state.tileConfig = snapshot && snapshot.tile_config ? snapshot.tile_config : state.tileConfig;
+    state.releases = Array.isArray(snapshot && snapshot.releases) ? snapshot.releases : [];
+    state.jobs = Array.isArray(snapshot && snapshot.jobs) ? snapshot.jobs : [];
+    state.jobWorkers = Array.isArray(snapshot && snapshot.job_workers) ? snapshot.job_workers : [];
+    if (Array.isArray(snapshot && snapshot.update_files)) {
+      state.updateFiles = snapshot.update_files;
+    }
+
+    patchTableRows(el.releaseRows, state.releases, releaseRowKey, releaseRowHtml);
+    patchTableRows(el.jobRows, state.jobs, jobRowKey, jobRowHtml);
+    patchTableRows(el.workerRows, state.jobWorkers, workerRowKey, workerRowHtml);
+
+    const jobChanged = logJobChanges(prevJobs, jobMap(state.jobs));
+    const releaseChanged = logReleaseChanges(prevReleases, releaseMap(state.releases));
+    const workerChanged = logWorkerChanges(prevWorkers, workerMap(state.jobWorkers));
+    updateSummary();
+    return { jobChanged, releaseChanged, workerChanged };
+  }
+
+  function stopMonitor() {
+    if (!state.monitorTimer) return;
+    clearTimeout(state.monitorTimer);
+    state.monitorTimer = null;
+  }
+
+  function scheduleMonitor(delayMs) {
+    if (state.sseConnected) return;
+    stopMonitor();
+    const wait = typeof delayMs === 'number' ? delayMs : autoRefreshDelayMs();
+    state.monitorTimer = setTimeout(runMonitorTick, wait);
+  }
+
+  async function runMonitorTick() {
+    if (state.sseConnected) {
+      stopMonitor();
+      return;
+    }
+
+    if (state.monitorBusy) {
+      scheduleMonitor(2000);
+      return;
+    }
+
+    state.monitorBusy = true;
+    try {
+      const prevJobs = jobMap(state.jobs);
+      const prevHasRunning = Array.from(prevJobs.values()).some((j) => j.status === 'RUNNING');
+      await loadJobs(true);
+      await loadJobWorkers(true);
+
+      const nextJobs = jobMap(state.jobs);
+      const nextHasRunning = Array.from(nextJobs.values()).some((j) => j.status === 'RUNNING');
+      const jobChanged = logJobChanges(prevJobs, nextJobs);
+      if (jobChanged || prevHasRunning || nextHasRunning || (state.monitorTickCount % 5 === 0)) {
+        await loadUpdateFiles(true);
+      }
+
+      const shouldRefreshRelease =
+        jobChanged ||
+        prevHasRunning ||
+        nextHasRunning ||
+        (state.monitorTickCount % 5 === 0);
+
+      let releaseChanged = false;
+      if (shouldRefreshRelease) {
+        const prevReleases = releaseMap(state.releases);
+        await loadReleases(true);
+        const nextReleases = releaseMap(state.releases);
+        releaseChanged = logReleaseChanges(prevReleases, nextReleases);
+      }
+
+      if (releaseChanged || jobChanged || state.monitorTickCount % 10 === 0) {
+        await loadTileConfig(true);
+      }
+
+      updateSummary();
+      state.monitorTickCount += 1;
+    } catch (e) {
+      const now = Date.now();
+      if ((now - state.lastMonitorErrorAt) > 30000) {
+        log(`자동 새로고침 오류: ${e.message || e}`);
+        state.lastMonitorErrorAt = now;
+      }
+    } finally {
+      state.monitorBusy = false;
+      scheduleMonitor();
+    }
+  }
+
+  function closeEventSource(resetRetry = true) {
+    if (state.eventSource) {
+      state.eventSource.close();
+      state.eventSource = null;
+    }
+    if (state.sseReconnectTimer) {
+      clearTimeout(state.sseReconnectTimer);
+      state.sseReconnectTimer = null;
+    }
+    state.sseConnected = false;
+    if (resetRetry) state.sseRetryCount = 0;
+  }
+
+  function scheduleSseReconnect() {
+    if (state.sseReconnectTimer) return;
+    const waitMs = Math.min(15000, 2000 + state.sseRetryCount * 1000);
+    state.sseReconnectTimer = setTimeout(() => {
+      state.sseReconnectTimer = null;
+      connectEventSource();
+    }, waitMs);
+  }
+
+  function connectEventSource() {
+    if (state.eventSource) return;
+
+    if (typeof window.EventSource === 'undefined') {
+      scheduleMonitor(1000);
+      return;
+    }
+
+    const source = new EventSource(adminEventsUrl());
+    state.eventSource = source;
+
+    source.addEventListener('open', () => {
+      if (state.eventSource !== source) return;
+      const shouldLog = !state.sseConnected;
+      state.sseConnected = true;
+      state.sseRetryCount = 0;
+      stopMonitor();
+      if (shouldLog) log('실시간 상태 연결됨');
+    });
+
+    source.addEventListener('snapshot', (event) => {
+      if (state.eventSource !== source) return;
+      try {
+        const snapshot = JSON.parse(event.data || '{}');
+        applySnapshot(snapshot);
+      } catch (e) {
+        log(`실시간 스냅샷 파싱 실패: ${e.message || e}`);
+      }
+    });
+
+    source.addEventListener('error', () => {
+      if (state.eventSource !== source) return;
+      const wasConnected = state.sseConnected;
+      source.close();
+      state.eventSource = null;
+      state.sseConnected = false;
+      state.sseRetryCount += 1;
+      if (wasConnected) log('실시간 연결이 끊겨 폴링으로 전환합니다.');
+      if (!wasConnected && state.sseRetryCount === 1) {
+        log('실시간 연결 실패. 토큰/네트워크를 확인하고 자동 재시도합니다.');
+      }
+      scheduleMonitor(1000);
+      scheduleSseReconnect();
+    });
+  }
+
+  function restartRealtimeSync() {
+    closeEventSource(true);
+    stopMonitor();
+    state.monitorBusy = false;
+    connectEventSource();
+  }
+
+  function bindClick(id, fn) {
+    const node = document.getElementById(id);
+    if (node) node.addEventListener('click', fn);
+  }
+
+  bindClick('saveToken', () => {
+    state.token = el.adminToken.value.trim();
+    localStorage.setItem('cadastral_admin_token', state.token);
+    syncAdminTokenCookie();
+    setTokenState();
+    log('토큰 저장 완료');
+    reloadAll().then(() => restartRealtimeSync());
+  });
+  bindClick('openLogViewer', () => {
+    syncAdminTokenCookie();
+    const popup = window.open('/admin/logs', 'cadastral-admin-logs', 'width=1500,height=980');
+    if (!popup) {
+      log('로그 페이지 팝업이 차단되었습니다. 팝업 허용 후 다시 시도하세요.');
+      return;
+    }
+    popup.focus();
+  });
+
+  bindClick('reloadAll', async () => {
+    await reloadAll();
+    scheduleMonitor();
+  });
+  bindClick('refreshStorage', async () => {
+    await loadStorageSummary();
+    scheduleMonitor();
+  });
+  bindClick('refreshAppVersionConfig', async () => {
+    await loadAppVersionConfig();
+    scheduleMonitor();
+  });
+  bindClick('refreshReleases', async () => {
+    await loadReleases();
+    updateSummary();
+    scheduleMonitor();
+  });
+  bindClick('refreshJobs', async () => {
+    await loadJobs();
+    updateSummary();
+    scheduleMonitor();
+  });
+  bindClick('refreshWorkers', async () => {
+    await loadJobWorkers();
+    scheduleMonitor();
+  });
+  bindClick('refreshUpdateSummary', async () => {
+    await Promise.all([loadReleases(true), loadJobs(true), loadJobWorkers(true), loadUpdateFiles(true)]);
+    updateSummary();
+    scheduleMonitor();
+  });
+  bindClick('refreshUpdateFiles', async () => {
+    await loadUpdateFiles();
+    updateSummary();
+    scheduleMonitor();
+  });
+  bindClick('saveAppCfgAndroid', async () => {
+    await saveUpdatePolicyConfig('android');
+    scheduleMonitor();
+  });
+  bindClick('saveAppCfgIos', async () => {
+    await saveUpdatePolicyConfig('ios');
+    scheduleMonitor();
+  });
+  bindClick('serverImportRun', runImportFromServerPath);
+  if (el.clearDataTypeButtons && el.clearDataTypeButtons.length > 0) {
+    el.clearDataTypeButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        clearDataType(btn.dataset.dataType || '');
+      });
+    });
+  }
+  if (el.simpleUploadDataType) {
+    const syncServerPath = () => {
+      updateAutoSourcePathUi();
+    };
+    el.simpleUploadDataType.addEventListener('change', syncServerPath);
+    if (el.operationMode) {
+      el.operationMode.addEventListener('change', syncServerPath);
+    }
+    syncServerPath();
+  }
+  if (el.jobRows) {
+    el.jobRows.addEventListener('click', (event) => {
+      const target = event.target.closest('button[data-action="cancel-job"]');
+      if (!target) return;
+      const jobId = Number(target.dataset.jobId || 0);
+      cancelImportJob(jobId);
+    });
+  }
+
+  window.addEventListener('beforeunload', () => closeEventSource(false));
+
+  syncAdminTokenCookie();
+  setTokenState();
+  reloadAll().then(() => restartRealtimeSync());
+</script>
+</body>
+</html>

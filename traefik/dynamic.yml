@@ -1,0 +1,18 @@
+http:
+  routers:
+    api:
+      rule: PathPrefix(`/`)
+      service: api
+      entryPoints:
+        - web
+    traefik-dashboard:
+      rule: PathPrefix(`/traefik`)
+      service: api@internal
+      entryPoints:
+        - web
+
+  services:
+    api:
+      loadBalancer:
+        servers:
+          - url: "http://api:8000"

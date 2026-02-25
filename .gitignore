@@ -1,0 +1,41 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python cache / virtualenv
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.venv/
+api/.venv/
+api/.venv-py312/
+
+# Runtime/generated data
+data/
+logs/
+backup/
+
+# Local DB / dumps / artifacts
+*.sqlite
+*.sqlite3
+*.db
+*.sql.gz
+*.dump
+
+# Temporary/editor/OS
+.DS_Store
+*.log
+
+# Large source links (mounted data)
+연속지적
+건축물정보
+건물통합정보
+토지정보
+
+# Local backup / spreadsheet artifacts
+*.bak_*
+*.xlsx
