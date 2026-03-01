@@ -25,7 +25,7 @@ from typing import Any, Dict
 import psycopg
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from psycopg import sql
@@ -1846,7 +1846,7 @@ def _resolve_resample_filter() -> Any:
     return mapping.get(name, Image.LANCZOS)
 
 
-def _load_tile_features(z: int, x: int, y: int) -> list[dict[str, Any]]:
+def _load_tile_features_png(z: int, x: int, y: int) -> list[dict[str, Any]]:
     table_name = os.getenv("CADASTRAL_TILE_TABLE", "cadastral_features")
     geojson_col = os.getenv("CADASTRAL_TILE_GEOJSON_COL", "geojson")
     label_col = os.getenv("CADASTRAL_TILE_LABEL_COL", "label")
@@ -1857,26 +1857,32 @@ def _load_tile_features(z: int, x: int, y: int) -> list[dict[str, Any]]:
     max_lon_col = os.getenv("CADASTRAL_TILE_MAX_LON_COL", "bbox_max_lon")
     min_lat_col = os.getenv("CADASTRAL_TILE_MIN_LAT_COL", "bbox_min_lat")
     max_lat_col = os.getenv("CADASTRAL_TILE_MAX_LAT_COL", "bbox_max_lat")
-    row_limit = int(os.getenv("CADASTRAL_TILE_DB_LIMIT", "6000"))
+    row_limit_raw = int(os.getenv("CADASTRAL_TILE_DB_LIMIT", "6000"))
+    row_limit = row_limit_raw if row_limit_raw > 0 else None
     release_col = os.getenv("CADASTRAL_TILE_RELEASE_COL", "release_id")
     active_release = _active_release("cadastral")
 
     west, south, east, north = _tile_bounds(z, x, y)
 
     def _query_rows(with_release_filter: bool, with_label_point: bool) -> list[tuple[Any, str, str, Any, Any]]:
+        bbox_expr = sql.SQL("box(point({min_lon_col}, {min_lat_col}), point({max_lon_col}, {max_lat_col}))").format(
+            min_lon_col=sql.Identifier(min_lon_col),
+            min_lat_col=sql.Identifier(min_lat_col),
+            max_lon_col=sql.Identifier(max_lon_col),
+            max_lat_col=sql.Identifier(max_lat_col),
+        )
+        tile_box_expr = sql.SQL("box(point(%s, %s), point(%s, %s))")
         clauses = [
-            sql.SQL("{max_lon_col} >= %s").format(max_lon_col=sql.Identifier(max_lon_col)),
-            sql.SQL("{min_lon_col} <= %s").format(min_lon_col=sql.Identifier(min_lon_col)),
-            sql.SQL("{max_lat_col} >= %s").format(max_lat_col=sql.Identifier(max_lat_col)),
-            sql.SQL("{min_lat_col} <= %s").format(min_lat_col=sql.Identifier(min_lat_col)),
+            sql.SQL("{bbox_expr} && {tile_box_expr}").format(
+                bbox_expr=bbox_expr,
+                tile_box_expr=tile_box_expr,
+            )
         ]
-        params: list[Any] = [west, east, south, north]
+        params: list[Any] = [west, south, east, north]
 
         if with_release_filter and active_release:
             clauses.append(sql.SQL("{release_col} = %s").format(release_col=sql.Identifier(release_col)))
             params.append(active_release["id"])
-
-        params.append(row_limit)
 
         if with_label_point:
             select_sql = sql.SQL(
@@ -1903,8 +1909,121 @@ def _load_tile_features(z: int, x: int, y: int) -> list[dict[str, Any]]:
             select_sql
             + sql.SQL("FROM {table_name} WHERE ").format(table_name=sql.Identifier(table_name))
             + sql.SQL(" AND ").join(clauses)
-            + sql.SQL(" LIMIT %s")
         )
+        if row_limit is not None:
+            query = query + sql.SQL(" LIMIT %s")
+            params.append(row_limit)
+
+        with psycopg.connect(_db_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                return cur.fetchall()
+
+    try:
+        if active_release:
+            try:
+                try:
+                    rows = _query_rows(with_release_filter=True, with_label_point=True)
+                except Exception:
+                    rows = _query_rows(with_release_filter=True, with_label_point=False)
+            except Exception:
+                try:
+                    rows = _query_rows(with_release_filter=False, with_label_point=True)
+                except Exception:
+                    rows = _query_rows(with_release_filter=False, with_label_point=False)
+        else:
+            try:
+                rows = _query_rows(with_release_filter=False, with_label_point=True)
+            except Exception:
+                rows = _query_rows(with_release_filter=False, with_label_point=False)
+    except Exception:
+        return []
+
+    features: list[dict[str, Any]] = []
+    for geojson_raw, label, pnu, label_lon, label_lat in rows:
+        geom = _safe_json_loads(geojson_raw)
+        if geom is None:
+            continue
+        features.append(
+            {
+                "geometry": geom,
+                "label": label,
+                "pnu": pnu,
+                "label_lon": float(label_lon) if isinstance(label_lon, (float, int)) else None,
+                "label_lat": float(label_lat) if isinstance(label_lat, (float, int)) else None,
+            }
+        )
+
+    return features
+
+
+def _load_tile_features_json(z: int, x: int, y: int) -> list[dict[str, Any]]:
+    table_name = os.getenv("CADASTRAL_TILE_TABLE", "cadastral_features")
+    geojson_col = os.getenv("CADASTRAL_TILE_GEOJSON_COL", "geojson")
+    label_col = os.getenv("CADASTRAL_TILE_LABEL_COL", "label")
+    pnu_col = os.getenv("CADASTRAL_TILE_PNU_COL", "pnu")
+    label_lon_col = os.getenv("CADASTRAL_TILE_LABEL_LON_COL", "label_lon")
+    label_lat_col = os.getenv("CADASTRAL_TILE_LABEL_LAT_COL", "label_lat")
+    min_lon_col = os.getenv("CADASTRAL_TILE_MIN_LON_COL", "bbox_min_lon")
+    max_lon_col = os.getenv("CADASTRAL_TILE_MAX_LON_COL", "bbox_max_lon")
+    min_lat_col = os.getenv("CADASTRAL_TILE_MIN_LAT_COL", "bbox_min_lat")
+    max_lat_col = os.getenv("CADASTRAL_TILE_MAX_LAT_COL", "bbox_max_lat")
+    row_limit_raw = int(os.getenv("CADASTRAL_VECTOR_TILE_DB_LIMIT", os.getenv("CADASTRAL_TILE_DB_LIMIT", "6000")))
+    row_limit = row_limit_raw if row_limit_raw > 0 else None
+    release_col = os.getenv("CADASTRAL_TILE_RELEASE_COL", "release_id")
+    active_release = _active_release("cadastral")
+
+    west, south, east, north = _tile_bounds(z, x, y)
+
+    def _query_rows(with_release_filter: bool, with_label_point: bool) -> list[tuple[Any, str, str, Any, Any]]:
+        bbox_expr = sql.SQL("box(point({min_lon_col}, {min_lat_col}), point({max_lon_col}, {max_lat_col}))").format(
+            min_lon_col=sql.Identifier(min_lon_col),
+            min_lat_col=sql.Identifier(min_lat_col),
+            max_lon_col=sql.Identifier(max_lon_col),
+            max_lat_col=sql.Identifier(max_lat_col),
+        )
+        tile_box_expr = sql.SQL("box(point(%s, %s), point(%s, %s))")
+        clauses = [
+            sql.SQL("{bbox_expr} && {tile_box_expr}").format(
+                bbox_expr=bbox_expr,
+                tile_box_expr=tile_box_expr,
+            )
+        ]
+        params: list[Any] = [west, south, east, north]
+
+        if with_release_filter and active_release:
+            clauses.append(sql.SQL("{release_col} = %s").format(release_col=sql.Identifier(release_col)))
+            params.append(active_release["id"])
+
+        if with_label_point:
+            select_sql = sql.SQL(
+                "SELECT {geojson_col}, COALESCE({label_col}::text, ''), COALESCE({pnu_col}::text, ''), "
+                "{label_lon_col}, {label_lat_col} "
+            ).format(
+                geojson_col=sql.Identifier(geojson_col),
+                label_col=sql.Identifier(label_col),
+                pnu_col=sql.Identifier(pnu_col),
+                label_lon_col=sql.Identifier(label_lon_col),
+                label_lat_col=sql.Identifier(label_lat_col),
+            )
+        else:
+            select_sql = sql.SQL(
+                "SELECT {geojson_col}, COALESCE({label_col}::text, ''), COALESCE({pnu_col}::text, ''), "
+                "NULL::double precision AS label_lon, NULL::double precision AS label_lat "
+            ).format(
+                geojson_col=sql.Identifier(geojson_col),
+                label_col=sql.Identifier(label_col),
+                pnu_col=sql.Identifier(pnu_col),
+            )
+
+        query = (
+            select_sql
+            + sql.SQL("FROM {table_name} WHERE ").format(table_name=sql.Identifier(table_name))
+            + sql.SQL(" AND ").join(clauses)
+        )
+        if row_limit is not None:
+            query = query + sql.SQL(" LIMIT %s")
+            params.append(row_limit)
 
         with psycopg.connect(_db_url()) as conn:
             with conn.cursor() as cur:
@@ -1950,7 +2069,7 @@ def _load_tile_features(z: int, x: int, y: int) -> list[dict[str, Any]]:
 
 
 def _render_cadastral_tile(z: int, x: int, y: int) -> bytes:
-    features = _load_tile_features(z, x, y)
+    features = _load_tile_features_png(z, x, y)
     if not features:
         return _empty_tile_bytes()
 
@@ -2190,6 +2309,18 @@ def _cadastral_cache_headers(z: int, x: int, y: int, cache_state: str, version: 
     }
 
 
+def _cadastral_nostore_headers(z: int, x: int, y: int, cache_state: str, version: str) -> dict[str, str]:
+    return {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "Vary": "Accept-Encoding",
+        "X-Tile-Cache": cache_state,
+        "X-Tile-Version": version,
+        "X-Tile-Render-Rev": _tile_render_rev(),
+    }
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return ok({"data_dir": os.getenv("DATA_DIR", "/data/uploads")})
@@ -2234,6 +2365,35 @@ async def get_cadastral_tile(
         return Response(status_code=304, headers=headers)
 
     return Response(content=data, media_type="image/png", headers=headers)
+
+
+@app.get("/v1/tiles/cadastral/{z}/{x}/{y}.json")
+async def get_cadastral_tile_features(
+    z: int,
+    x: int,
+    y: int,
+    v: str | None = Query(default=None),
+) -> Response:
+    tile_version = v or _tile_version()
+    headers = _cadastral_nostore_headers(z, x, y, "skip", version=tile_version)
+
+    min_zoom = _tile_min_zoom()
+    max_zoom = _tile_max_zoom()
+    max_index = (1 << z) - 1 if z >= 0 else -1
+    if (
+        z < min_zoom
+        or z > max_zoom
+        or x < 0
+        or y < 0
+        or x > max_index
+        or y > max_index
+    ):
+        payload = ok({"z": z, "x": x, "y": y, "items": []})
+        return JSONResponse(content=jsonable_encoder(payload), headers={**headers, "X-Tile-Cache": "range"})
+
+    features = await asyncio.to_thread(_load_tile_features_json, z, x, y)
+    payload = ok({"z": z, "x": x, "y": y, "items": features})
+    return JSONResponse(content=jsonable_encoder(payload), headers={**headers, "X-Tile-Cache": "db"})
 
 _BUILDING_INFO_DATASET_TO_BUCKET: dict[str, str] = {
     "building_info_total": "total",
@@ -3678,7 +3838,7 @@ def _fetch_cadastral_geo_items(
         items.append(
             {
                 "pnu": item_pnu,
-                "label": str(label_raw or ""),
+                "label": _label_text(label_raw, item_pnu),
                 "geometry": geometry,
                 "label_lon": label_lon,
                 "label_lat": label_lat,
@@ -3753,7 +3913,7 @@ def _fetch_cadastral_geo_items(
         items.append(
             {
                 "pnu": item_pnu,
-                "label": str(label_raw or ""),
+                "label": _label_text(label_raw, item_pnu),
                 "geometry": geometry,
                 "label_lon": label_lon,
                 "label_lat": label_lat,
@@ -3896,7 +4056,7 @@ def _fetch_cadastral_geo_items_by_bounds(
         items.append(
             {
                 "pnu": item_pnu,
-                "label": str(label_raw or ""),
+                "label": _label_text(label_raw, item_pnu),
                 "geometry": geometry,
                 "label_lon": label_lon,
                 "label_lat": label_lat,
