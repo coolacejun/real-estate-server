@@ -739,6 +739,66 @@
         <article class="automation-panel">
           <div class="automation-head">
             <div>
+              <p class="automation-title">토지이동 증분</p>
+              <div class="automation-subtitle mono">land_info_al_d157 / CH_D157</div>
+            </div>
+            <p id="landMovementSyncStatus" class="metric-value mono">-</p>
+          </div>
+          <div class="automation-body">
+            <div class="progress"><span id="landMovementSyncProgressBar"></span></div>
+            <div class="metric-grid">
+              <div class="metric">
+                <p class="metric-label">활성 Release</p>
+                <p id="landMovementSyncRelease" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 반영 기준</p>
+                <p id="landMovementSyncLowerBound" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">다음 확인</p>
+                <p id="landMovementSyncNextCheck" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 Job</p>
+                <p id="landMovementSyncJob" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 실행</p>
+                <p id="landMovementSyncLastRun" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">검증</p>
+                <p id="landMovementSyncVerification" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">작업 파일</p>
+                <p id="landMovementSyncWork" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">반영 파일</p>
+                <p id="landMovementSyncRecorded" class="metric-value mono">-</p>
+              </div>
+            </div>
+            <div class="table-wrap compact-table">
+              <table>
+                <thead>
+                <tr>
+                  <th>단계</th>
+                  <th>파일</th>
+                  <th>시각</th>
+                  <th>Status</th>
+                </tr>
+                </thead>
+                <tbody id="landMovementSyncFileRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+
+        <article class="automation-panel">
+          <div class="automation-head">
+            <div>
               <p class="automation-title">토지정보</p>
               <div class="automation-subtitle mono">worker direct upload / AL_D155,D157,D161,D195</div>
             </div>
@@ -1012,6 +1072,7 @@
     buildingHubSync: null,
     cadastralSync: null,
     buildingIntegratedSync: null,
+    landMovementSync: null,
     landInfoSync: null,
     monitorTimer: null,
     monitorBusy: false,
@@ -1089,6 +1150,17 @@
     buildingIntegratedSyncVerification: document.getElementById('buildingIntegratedSyncVerification'),
     buildingIntegratedSyncProgressBar: document.getElementById('buildingIntegratedSyncProgressBar'),
     buildingIntegratedSyncFileRows: document.getElementById('buildingIntegratedSyncFileRows'),
+    landMovementSyncStatus: document.getElementById('landMovementSyncStatus'),
+    landMovementSyncRelease: document.getElementById('landMovementSyncRelease'),
+    landMovementSyncLowerBound: document.getElementById('landMovementSyncLowerBound'),
+    landMovementSyncNextCheck: document.getElementById('landMovementSyncNextCheck'),
+    landMovementSyncLastRun: document.getElementById('landMovementSyncLastRun'),
+    landMovementSyncJob: document.getElementById('landMovementSyncJob'),
+    landMovementSyncWork: document.getElementById('landMovementSyncWork'),
+    landMovementSyncVerification: document.getElementById('landMovementSyncVerification'),
+    landMovementSyncRecorded: document.getElementById('landMovementSyncRecorded'),
+    landMovementSyncProgressBar: document.getElementById('landMovementSyncProgressBar'),
+    landMovementSyncFileRows: document.getElementById('landMovementSyncFileRows'),
     landInfoSyncStatus: document.getElementById('landInfoSyncStatus'),
     landInfoSyncRelease: document.getElementById('landInfoSyncRelease'),
     landInfoSyncComponents: document.getElementById('landInfoSyncComponents'),
@@ -1145,6 +1217,14 @@
         return '건물통합정보';
       case 'land_info':
         return '토지정보';
+      case 'land_info_al_d155':
+        return '토지특성';
+      case 'land_info_al_d157':
+        return '토지이동';
+      case 'land_info_al_d161':
+        return '토지이용계획';
+      case 'land_info_al_d195':
+        return '토지소유';
       case 'cadastral':
       default:
         return '연속지적';
@@ -1948,6 +2028,135 @@
     setBuildingHubText(el.buildingIntegratedSyncVerification, verificationText);
     setProgressBar(el.buildingIntegratedSyncProgressBar, latestJob);
     renderBuildingIntegratedSyncFileRows();
+  }
+
+  function landMovementSyncFileRows() {
+    const data = state.landMovementSync || {};
+    const localWork = data.local_work && typeof data.local_work === 'object' ? data.local_work : {};
+    const rawItems = localWork.raw && Array.isArray(localWork.raw.items) ? localWork.raw.items : [];
+    const stagingItems = localWork.staging && Array.isArray(localWork.staging.items) ? localWork.staging.items : [];
+    const extractedItems = localWork.extracted && Array.isArray(localWork.extracted.items) ? localWork.extracted.items : [];
+    const updateItems = Array.isArray(data.recent_update_files) ? data.recent_update_files : [];
+    const rows = [];
+    stagingItems.slice(0, 4).forEach((item) => rows.push({
+      stage: item.parent || 'staging',
+      file: item.name,
+      size: item.size,
+      at: item.modified_at,
+      status: 'STAGED',
+    }));
+    rawItems.slice(0, 4).forEach((item) => rows.push({
+      stage: 'raw',
+      file: item.name,
+      size: item.size,
+      at: item.modified_at,
+      status: 'DOWNLOADED',
+    }));
+    extractedItems.slice(0, 3).forEach((item) => rows.push({
+      stage: item.parent || 'extracted',
+      file: item.name,
+      size: item.size,
+      at: item.modified_at,
+      status: 'EXTRACTED',
+    }));
+    updateItems.slice(0, 6).forEach((item) => rows.push({
+      stage: 'imported',
+      file: item.file_name,
+      size: item.file_size,
+      at: item.created_at,
+      status: item.release_status || 'RECORDED',
+    }));
+    return rows.slice(0, 12);
+  }
+
+  function renderLandMovementSyncFileRows() {
+    if (!el.landMovementSyncFileRows) return;
+    const rows = landMovementSyncFileRows();
+    if (rows.length < 1) {
+      el.landMovementSyncFileRows.innerHTML = `
+        <tr>
+          <td colspan="4" class="muted">토지이동 증분 파일 이력이 없습니다.</td>
+        </tr>
+      `;
+      return;
+    }
+    el.landMovementSyncFileRows.innerHTML = rows.map((item) => `
+      <tr>
+        <td>${escapeHtml(item.stage || '-')}</td>
+        <td class="mono">${escapeHtml(item.file || '-')}<div class="muted mono">${escapeHtml(formatBytes(item.size))}</div></td>
+        <td>${escapeHtml(formatIsoToLocale(item.at))}</td>
+        <td><span class="${statusClass(item.status)}">${escapeHtml(item.status || '-')}</span></td>
+      </tr>
+    `).join('');
+  }
+
+  function renderLandMovementSyncStatus() {
+    const data = state.landMovementSync || {};
+    const scheduler = data.scheduler && typeof data.scheduler === 'object' ? data.scheduler : {};
+    const activeRelease = data.active_release && typeof data.active_release === 'object' ? data.active_release : {};
+    const latestRun = data.latest_run && typeof data.latest_run === 'object' ? data.latest_run : {};
+    const verification = latestRun.verification && typeof latestRun.verification === 'object'
+      ? latestRun.verification
+      : {};
+    const latestJob = data.latest_job && typeof data.latest_job === 'object' ? data.latest_job : {};
+    const localWork = data.local_work && typeof data.local_work === 'object' ? data.local_work : {};
+    const config = data.config && typeof data.config === 'object' ? data.config : {};
+    const latestRecorded = Array.isArray(data.recent_update_files) && data.recent_update_files.length > 0
+      ? data.recent_update_files[0]
+      : null;
+
+    const schedulerStatus = String(scheduler.status || '');
+    const schedulerReason = scheduler.reason ? ` (${scheduler.reason})` : '';
+    if (schedulerStatus && el.landMovementSyncStatus) {
+      el.landMovementSyncStatus.innerHTML =
+        `<span class="${statusClass(schedulerStatus)}">${escapeHtml(schedulerStatus)}</span>${escapeHtml(schedulerReason)}`;
+    } else {
+      setBuildingHubText(el.landMovementSyncStatus, '-');
+    }
+
+    const releaseText = activeRelease.id
+      ? `${activeRelease.id} (${activeRelease.version || '-'}) / ${Number(activeRelease.records_count || 0).toLocaleString()} rows`
+      : '-';
+    setBuildingHubText(el.landMovementSyncRelease, releaseText);
+
+    const lowerBound = latestRun.lower_bound || (verification.release_version ? `release ${verification.release_version}` : '-');
+    const missingText = latestRun.missing_count != null
+      ? `${lowerBound} / detected ${Number(latestRun.missing_count || 0).toLocaleString()}`
+      : lowerBound;
+    setBuildingHubText(el.landMovementSyncLowerBound, missingText);
+    setBuildingHubText(el.landMovementSyncNextCheck, formatIsoToLocale(scheduler.next_check_at));
+
+    const runText = latestRun.status
+      ? `${latestRun.status} / ${formatIsoToLocale(latestRun.finished_at || latestRun.started_at)}`
+      : '-';
+    setBuildingHubText(el.landMovementSyncLastRun, runText);
+
+    const jobText = latestJob.id
+      ? `${latestJob.id} (${latestJob.status || '-'}) ${Number(latestJob.processed_files || 0).toLocaleString()}/${Number(latestJob.total_files || 0).toLocaleString()} files / ${Number(latestJob.inserted_rows || 0).toLocaleString()} rows`
+      : '-';
+    setBuildingHubText(el.landMovementSyncJob, jobText);
+
+    const rawCount = localWork.raw && localWork.raw.count != null ? Number(localWork.raw.count || 0) : 0;
+    const stagingCount = localWork.staging && localWork.staging.count != null ? Number(localWork.staging.count || 0) : 0;
+    const extractedCount = localWork.extracted && localWork.extracted.count != null ? Number(localWork.extracted.count || 0) : 0;
+    const maxFiles = config.max_files === 0 ? 'all' : String(config.max_files ?? '-');
+    const workText = data.sync_dir
+      ? `${rawCount} zip / ${stagingCount} staged / ${extractedCount} extracted / max ${maxFiles}`
+      : '-';
+    setBuildingHubText(el.landMovementSyncWork, workText);
+
+    const verificationText = verification.expected_count != null
+      ? `${Number(verification.recorded_count || 0).toLocaleString()}/${Number(verification.expected_count || 0).toLocaleString()} recorded`
+      : (data.update_file_count != null ? `${Number(data.update_file_count || 0).toLocaleString()} recorded` : '-');
+    setBuildingHubText(el.landMovementSyncVerification, verificationText);
+
+    const recordedText = latestRecorded
+      ? `${Number(data.update_file_count || 0).toLocaleString()} files / ${latestRecorded.file_name || '-'}`
+      : (data.update_file_count != null ? `${Number(data.update_file_count || 0).toLocaleString()} files` : '-');
+    setBuildingHubText(el.landMovementSyncRecorded, recordedText);
+
+    setProgressBar(el.landMovementSyncProgressBar, latestJob);
+    renderLandMovementSyncFileRows();
   }
 
   function directStatusCounts(request) {
@@ -3055,6 +3264,43 @@
     }
   }
 
+  async function loadLandMovementSyncStatus(silent = false) {
+    try {
+      const data = await api('/v1/admin/land-movement-sync/status', { method: 'GET' });
+      state.landMovementSync = data && typeof data === 'object' ? data : {};
+      renderLandMovementSyncStatus();
+      if (!silent) log('토지이동 증분 상태 조회 완료');
+    } catch (e) {
+      const dataType = 'land_info_al_d157';
+      const activeRelease = state.releases.find((r) => r.is_active && r.data_type === dataType) || null;
+      const latestJob = state.jobs.find((j) => (j.data_type || 'cadastral') === dataType) || null;
+      const recentUpdateFiles = state.updateFiles
+        .filter((item) => (item.data_type || 'cadastral') === dataType)
+        .slice(0, 8);
+      const jobStatus = String((latestJob && latestJob.status) || '').toUpperCase();
+      const schedulerStatus = jobStatus === 'RUNNING' || jobStatus === 'QUEUED' ? 'IMPORTING' : 'WAITING';
+      state.landMovementSync = {
+        active_release: activeRelease,
+        latest_job: latestJob,
+        recent_update_files: recentUpdateFiles,
+        update_file_count: recentUpdateFiles.length,
+        local_work: {},
+        scheduler: {
+          status: schedulerStatus,
+          reason: latestJob ? `기존 job API 기준 (${latestJob.id})` : '전용 상태 API 반영 대기',
+        },
+      };
+      renderLandMovementSyncStatus();
+      if (el.landMovementSyncFileRows) {
+        const firstRow = el.landMovementSyncFileRows.querySelector('tr td');
+        if (firstRow && String(firstRow.textContent || '').includes('파일 이력이 없습니다')) {
+          firstRow.textContent = `전용 상태 API 반영 대기: ${e.message || e}`;
+        }
+      }
+      if (!silent) log(`토지이동 증분 상태는 기존 job API로 표시 중: ${e.message}`);
+    }
+  }
+
   async function loadLandInfoSyncStatus(silent = false) {
     try {
       const data = await api('/v1/admin/land-info-sync/status', { method: 'GET' });
@@ -3105,6 +3351,7 @@
       loadBuildingHubSyncStatus(true),
       loadCadastralSyncStatus(true),
       loadBuildingIntegratedSyncStatus(true),
+      loadLandMovementSyncStatus(true),
       loadLandInfoSyncStatus(true),
     ]);
     updateSummary();
@@ -3193,6 +3440,7 @@
         await loadBuildingHubSyncStatus(true);
         await loadCadastralSyncStatus(true);
         await loadBuildingIntegratedSyncStatus(true);
+        await loadLandMovementSyncStatus(true);
         await loadLandInfoSyncStatus(true);
       }
 
@@ -3349,6 +3597,7 @@
       loadBuildingHubSyncStatus(true),
       loadCadastralSyncStatus(true),
       loadBuildingIntegratedSyncStatus(true),
+      loadLandMovementSyncStatus(true),
       loadLandInfoSyncStatus(true),
     ]);
     scheduleMonitor();
