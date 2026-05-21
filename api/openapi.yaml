@@ -52,6 +52,35 @@ paths:
               schema:
                 $ref: '#/components/schemas/SimpleDataResponse'
 
+  /v1/data/building_info/verify:
+    get:
+      summary: Verify active building info client payload
+      parameters:
+        - name: pnu
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional PNU to verify. If omitted, the API selects a sample PNU from the active release.
+        - name: include_sample
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include the actual compressed sample part in the response.
+      responses:
+        '200':
+          description: Active building info release can be read through the client data path
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BuildingInfoVerifyResponse'
+        '404':
+          description: Requested PNU has no building info payload
+        '503':
+          description: Active release or sample payload is not available
+
   /v1/data/{collection}/{pnu}:
     get:
       summary: Compressed data by collection and pnu
@@ -99,6 +128,23 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DataBatchResponse'
+
+  /v1/reports/site-plan:
+    post:
+      summary: Site plan GPT report
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SitePlanReportRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SitePlanReportResponse'
 
   /v1/tile/{root}/{parent}/{id}:
     get:
@@ -469,6 +515,45 @@ components:
           $ref: '#/components/schemas/Error'
       required: [ok, data]
 
+    BuildingInfoVerifyResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [ok]
+            collection:
+              type: string
+              enum: [building_info]
+            pnu:
+              type: string
+            sample_source:
+              type: string
+              enum: [request, active_release]
+            release:
+              type: object
+            client_endpoint:
+              type: string
+            checks:
+              type: object
+            response:
+              type: object
+            bucket_counts:
+              type: object
+              additionalProperties:
+                type: integer
+            has_meta:
+              type: boolean
+            sample:
+              type: object
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
     DataBatchRequest:
       type: object
       properties:
@@ -516,6 +601,50 @@ components:
               type: array
               items:
                 type: string
+        error:
+          $ref: '#/components/schemas/Error'
+      required: [ok, data]
+
+    SitePlanReportRequest:
+      type: object
+      properties:
+        address:
+          type: string
+        pnu:
+          type: string
+        use:
+          type: string
+          enum: [house, multi, retail, mixed]
+        area_pyeong:
+          type: number
+        budget_manwon:
+          type: number
+        priority:
+          type: string
+          enum: [budget, speed, yield, balance]
+        data:
+          type: object
+      required: [address]
+
+    SitePlanReportResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            generated_by:
+              type: string
+              enum: [openai, server_draft]
+            model:
+              type: string
+            warning:
+              type: string
+            basis:
+              type: object
+            report:
+              type: object
         error:
           $ref: '#/components/schemas/Error'
       required: [ok, data]

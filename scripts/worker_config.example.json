@@ -1,0 +1,29 @@
+{
+  "vworld_user_id": "",
+  "vworld_user_password": "",
+  "browser_channel": "msedge",
+  "download_dir": "C:\\land-info-worker\\downloads",
+  "set_download_path_in_raonk": false,
+  "trigger_mode": "selection_url",
+  "button_texts": [
+    "확인",
+    "예",
+    "폴더선택",
+    "폴더 선택",
+    "찾아보기",
+    "시작",
+    "다운로드",
+    "저장",
+    "열기",
+    "계속",
+    "OK",
+    "Yes",
+    "Browse",
+    "Select Folder",
+    "Start",
+    "Download",
+    "Save",
+    "Open",
+    "Continue"
+  ]
+}

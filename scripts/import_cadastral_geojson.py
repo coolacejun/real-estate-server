@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import concurrent.futures
 import contextlib
 import glob
@@ -27,12 +28,17 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit("ijson이 필요합니다. api 컨테이너 재빌드 후 실행하세요.") from exc
 
 
+_DEFAULT_CADASTRAL_PATTERN = "AL_D002*.json"
+_UPDATE_PATTERN_FALLBACKS = ("CH_D002*.geojson", "*.geojson", "*.json")
+_NON_UTF8_GEOJSON_ENCODING = "cp949"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="연속지적 GeoJSON -> cadastral_features 적재")
     parser.add_argument("--data-type", default="cadastral")
     parser.add_argument("--release-id", type=int, required=True)
     parser.add_argument("--source-dir", required=True)
-    parser.add_argument("--pattern", default="AL_D002*.json")
+    parser.add_argument("--pattern", default=_DEFAULT_CADASTRAL_PATTERN)
     parser.add_argument("--db-url", default=os.getenv("DATABASE_URL", ""))
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument(
@@ -54,6 +60,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _iter_geojson_features(stream: Any) -> Iterable[dict[str, Any]]:
+    for feature in ijson.items(stream, "features.item"):
+        if isinstance(feature, dict):
+            yield feature
+
+
+def _path_is_utf8(path: Path, chunk_size: int = 1024 * 1024) -> bool:
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    try:
+        with path.open("rb") as fp:
+            while True:
+                chunk = fp.read(chunk_size)
+                if not chunk:
+                    break
+                decoder.decode(chunk, final=False)
+            decoder.decode(b"", final=True)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def iter_features(path: Path) -> Iterable[dict[str, Any]]:
     if path.suffix.lower() == ".ndjson":
         with path.open("r", encoding="utf-8", errors="ignore") as fp:
@@ -69,10 +96,14 @@ def iter_features(path: Path) -> Iterable[dict[str, Any]]:
                     yield feature
         return
 
-    with path.open("rb") as fp:
-        for feature in ijson.items(fp, "features.item"):
-            if isinstance(feature, dict):
-                yield feature
+    if _path_is_utf8(path):
+        with path.open("rb") as fp:
+            yield from _iter_geojson_features(fp)
+        return
+
+    # Some change-dataset files in check/ are CP949/EUC-KR encoded GeoJSON.
+    with path.open("r", encoding=_NON_UTF8_GEOJSON_ENCODING) as fp:
+        yield from _iter_geojson_features(fp)
 
 
 def _json_default(value: Any) -> Any:
@@ -86,9 +117,43 @@ def _json_default(value: Any) -> Any:
 def _dataset_code_from_name(path: Path) -> str:
     stem = path.stem.upper()
     parts = stem.split("_")
-    if len(parts) >= 2 and parts[0] == "AL" and parts[1].startswith("D"):
-        return f"{parts[0]}_{parts[1]}"
+    if len(parts) >= 2 and parts[0] in {"AL", "CH"} and parts[1].startswith("D"):
+        dataset_code = f"{parts[0]}_{parts[1]}"
+        if dataset_code == "CH_D002":
+            return "AL_D002"
+        return dataset_code
     return stem[:40]
+
+
+def _dataset_code_aliases(dataset_code: str) -> list[str]:
+    normalized = str(dataset_code or "").strip().upper()
+    aliases = {normalized}
+    if normalized == "AL_D002":
+        aliases.add("CH_D002")
+    return sorted(code for code in aliases if code)
+
+
+def _dataset_code_like_patterns(dataset_code: str) -> list[str]:
+    normalized = str(dataset_code or "").strip().upper()
+    if normalized == "AL_D002":
+        return ["CH_D002%"]
+    return []
+
+
+def _resolve_source_files(source_dir: Path, pattern: str, operation_mode: str) -> tuple[list[Path], str]:
+    candidates = [str(pattern or "").strip() or _DEFAULT_CADASTRAL_PATTERN]
+    if str(operation_mode or "").strip().lower() == "update":
+        candidates.extend(_UPDATE_PATTERN_FALLBACKS)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        files = sorted(Path(p).resolve() for p in glob.glob(str(source_dir / candidate)))
+        if files:
+            return files, candidate
+    return [], candidates[0]
 
 
 def _normalize_op_text(value: Any) -> str:
@@ -1118,9 +1183,14 @@ def main() -> int:
         raise SystemExit("DATABASE_URL이 필요합니다. --db-url 또는 환경변수로 전달하세요.")
 
     source_dir = Path(args.source_dir)
-    files = sorted(Path(p).resolve() for p in glob.glob(str(source_dir / args.pattern)))
+    files, resolved_pattern = _resolve_source_files(source_dir, args.pattern, args.operation_mode)
     if not files:
         raise SystemExit(f"대상 파일이 없습니다: {source_dir}/{args.pattern}")
+    if resolved_pattern != args.pattern:
+        print(
+            f"[INFO] 입력 패턴 자동 전환: requested={args.pattern}, resolved={resolved_pattern}",
+            flush=True,
+        )
 
     release_id = args.release_id
     batch_size = max(100, args.batch_size)
@@ -1245,6 +1315,8 @@ def main() -> int:
                     pending_delete_pnus: set[str] = set()
                     cleared_pnus: set[str] = set()
                     dataset_code = _dataset_code_from_name(path)
+                    dataset_code_aliases = _dataset_code_aliases(dataset_code)
+                    dataset_code_like_patterns = _dataset_code_like_patterns(dataset_code)
                     row_no = 0
                     reported_rows = 0
                     with conn.transaction():
@@ -1280,10 +1352,19 @@ def main() -> int:
                                         DELETE FROM dataset_record
                                         WHERE release_id = %s
                                           AND data_type = %s
-                                          AND dataset_code = %s
+                                          AND (
+                                            dataset_code = ANY(%s)
+                                            OR dataset_code LIKE ANY(%s)
+                                          )
                                           AND pnu = ANY(%s)
                                         """,
-                                        (release_id, data_type, dataset_code, delete_pnus),
+                                        (
+                                            release_id,
+                                            data_type,
+                                            dataset_code_aliases,
+                                            dataset_code_like_patterns,
+                                            delete_pnus,
+                                        ),
                                     )
                                     conn.execute(
                                         """
@@ -1304,10 +1385,19 @@ def main() -> int:
                                         DELETE FROM dataset_record
                                         WHERE release_id = %s
                                           AND data_type = %s
-                                          AND dataset_code = %s
+                                          AND (
+                                            dataset_code = ANY(%s)
+                                            OR dataset_code LIKE ANY(%s)
+                                          )
                                           AND pnu = ANY(%s)
                                         """,
-                                        (release_id, data_type, dataset_code, upsert_pnus),
+                                        (
+                                            release_id,
+                                            data_type,
+                                            dataset_code_aliases,
+                                            dataset_code_like_patterns,
+                                            upsert_pnus,
+                                        ),
                                     )
                                     conn.execute(
                                         """

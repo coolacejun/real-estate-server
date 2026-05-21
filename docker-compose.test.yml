@@ -1,0 +1,93 @@
+services:
+  api_test:
+    build: ./api
+    container_name: api_test
+    env_file: .env.test
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATA_DIR=/data/uploads
+      - TILE_CACHE_DIR=/data/uploads/tile_cache
+      - CADASTRAL_TILE_VERSION=v1
+      - CADASTRAL_TILE_RENDER_REV=r15
+      - CADASTRAL_TILE_SIZE=512
+      - CADASTRAL_TILE_SUPERSAMPLE=4
+      - CADASTRAL_TILE_STROKE_WIDTH=0.95
+      - CADASTRAL_TILE_STROKE_ALPHA=210
+      - CADASTRAL_TILE_LABEL_ENABLED=true
+      - CADASTRAL_TILE_LABEL_MIN_ZOOM=17
+      - CADASTRAL_TILE_LABEL_MIN_BOX=6
+      - CADASTRAL_TILE_LABEL_MIN_FONT_PX=12
+      - CADASTRAL_TILE_LABEL_MAX_FONT_PX=44
+      - CADASTRAL_TILE_LABEL_STROKE_WIDTH=1.9
+      - CADASTRAL_TILE_LABEL_MIN_ZOOM_SCALE=0.60
+      - CADASTRAL_TILE_LABEL_MAX_ZOOM_SCALE=1.15
+      - CADASTRAL_TILE_DOWNSAMPLE_FILTER=lanczos
+      - CADASTRAL_TILE_PREFILTER_BLUR_RADIUS=0.0
+      - CADASTRAL_TILE_UNSHARP_RADIUS=0.7
+      - CADASTRAL_TILE_UNSHARP_PERCENT=140
+      - CADASTRAL_TILE_UNSHARP_THRESHOLD=1
+      - CADASTRAL_TILE_LABEL_FONT_PATH=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+      - CADASTRAL_TILE_MIN_ZOOM=17
+      - CADASTRAL_TILE_MAX_ZOOM=21
+      - CADASTRAL_TILE_MEMORY_CACHE_SIZE=512
+      - CADASTRAL_TILE_IOS_HIGH_DPR_THRESHOLD=2.2
+      - CADASTRAL_TILE_IOS_DEFAULT_PROFILE=high
+      - CADASTRAL_TILE_IOS_LOW_SUPERSAMPLE_BONUS=2
+      - CADASTRAL_TILE_IOS_HIGH_SUPERSAMPLE_BONUS=3
+      - CADASTRAL_TILE_IOS_LOW_STROKE_SCALE=1.75
+      - CADASTRAL_TILE_IOS_HIGH_STROKE_SCALE=2.30
+      - CADASTRAL_TILE_IOS_LOW_STROKE_ALPHA_BOOST=70
+      - CADASTRAL_TILE_IOS_HIGH_STROKE_ALPHA_BOOST=120
+      - CADASTRAL_TILE_IOS_LOW_LABEL_SCALE=1.55
+      - CADASTRAL_TILE_IOS_HIGH_LABEL_SCALE=1.95
+      - CADASTRAL_TILE_IOS_LOW_LABEL_STROKE_SCALE=1.45
+      - CADASTRAL_TILE_IOS_HIGH_LABEL_STROKE_SCALE=1.90
+      - CADASTRAL_TILE_DB_LIMIT=0
+      - CADASTRAL_TILE_TABLE=cadastral_features
+      - CADASTRAL_TILE_RELEASE_COL=release_id
+      - CADASTRAL_TILE_GEOJSON_COL=geojson
+      - CADASTRAL_TILE_LABEL_COL=label
+      - CADASTRAL_TILE_PNU_COL=pnu
+      - CADASTRAL_TILE_LABEL_LON_COL=label_lon
+      - CADASTRAL_TILE_LABEL_LAT_COL=label_lat
+      - CADASTRAL_IMPORT_LABEL_PRECISION=0.00002
+      - CADASTRAL_TILE_MIN_LON_COL=bbox_min_lon
+      - CADASTRAL_TILE_MAX_LON_COL=bbox_max_lon
+      - CADASTRAL_TILE_MIN_LAT_COL=bbox_min_lat
+      - CADASTRAL_TILE_MAX_LAT_COL=bbox_max_lat
+      - BUILDING_INFO_IMPORT_WORKERS=0
+      - IMPORT_BATCH_SIZE_BUILDING_INFO_FULL=12000
+      - IMPORT_BATCH_SIZE_BUILDING_INFO_UPDATE=4000
+      - DATASET_PAYLOAD_VALUES_COMPRESS_LAND_INFO=0
+      - LAND_INFO_STORE_SOURCE_METADATA=0
+      - SERVER_LOG_FILE=/var/log/server/server_test.log
+      - KAKAO_REST_API_KEY=${KAKAO_REST_API_KEY:-}
+    volumes:
+      - ./data/uploads_test:/data/uploads
+      - ./logs/test-api:/var/log/server
+      - ./scripts:/scripts:ro
+      - ./연속지적:/data/uploads/연속지적:ro
+      - ./건축물정보:/data/source/building_info:ro
+      - ./건물통합정보:/data/source/building_integrated_info:ro
+      - ./토지정보:/data/source/land_info:ro
+    depends_on:
+      - redis
+    ports:
+      - 0.0.0.0:18000:8000
+    restart: unless-stopped
+    networks:
+      - default
+      - prod_net
+
+  redis:
+    image: redis:7
+    container_name: redis_test
+    command: [redis-server, --appendonly, yes]
+    volumes:
+      - ./data/redis_test:/data
+    restart: unless-stopped
+
+networks:
+  prod_net:
+    external: true
+    name: server_default

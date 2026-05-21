@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import concurrent.futures
 import contextlib
 import glob
@@ -27,6 +28,11 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit("ijson이 필요합니다. api 컨테이너 재빌드 후 실행하세요.") from exc
 
 
+_DEFAULT_BUILDING_INTEGRATED_PATTERN = "AL_D010*.json"
+_UPDATE_PATTERN_FALLBACKS = ("CH_D010*.geojson", "*.geojson", "*.json")
+_NON_UTF8_GEOJSON_ENCODING = "cp949"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="GIS건물통합정보 GeoJSON 적재 (기본: dataset_record; 선택: dataset_pnu_kv)"
@@ -39,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--release-id", type=int, required=True)
     parser.add_argument("--source-dir", required=True)
-    parser.add_argument("--pattern", default="AL_D010*.json")
+    parser.add_argument("--pattern", default=_DEFAULT_BUILDING_INTEGRATED_PATTERN)
     parser.add_argument("--db-url", default=os.getenv("DATABASE_URL", ""))
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument(
@@ -74,10 +80,49 @@ def iter_features(path: Path):
                     yield feature
         return
 
-    with path.open("rb") as fp:
+    if _path_is_utf8(path):
+        with path.open("rb") as fp:
+            for feature in ijson.items(fp, "features.item"):
+                if isinstance(feature, dict):
+                    yield feature
+        return
+
+    # Some change-dataset files in check/ are CP949/EUC-KR encoded GeoJSON.
+    with path.open("r", encoding=_NON_UTF8_GEOJSON_ENCODING) as fp:
         for feature in ijson.items(fp, "features.item"):
             if isinstance(feature, dict):
                 yield feature
+
+
+def _path_is_utf8(path: Path, chunk_size: int = 1024 * 1024) -> bool:
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    try:
+        with path.open("rb") as fp:
+            while True:
+                chunk = fp.read(chunk_size)
+                if not chunk:
+                    break
+                decoder.decode(chunk, final=False)
+            decoder.decode(b"", final=True)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _resolve_source_files(source_dir: Path, pattern: str, operation_mode: str) -> tuple[list[Path], str]:
+    candidates = [str(pattern or "").strip() or _DEFAULT_BUILDING_INTEGRATED_PATTERN]
+    if str(operation_mode or "").strip().lower() == "update":
+        candidates.extend(_UPDATE_PATTERN_FALLBACKS)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        files = sorted(Path(p).resolve() for p in glob.glob(str(source_dir / candidate)))
+        if files:
+            return files, candidate
+    return [], candidates[0]
 
 
 def _json_default(value: Any) -> Any:
@@ -1106,14 +1151,14 @@ def main() -> int:
         raise SystemExit("DATABASE_URL이 필요합니다.")
 
     source_dir = Path(args.source_dir)
-    files = sorted(Path(p).resolve() for p in glob.glob(str(source_dir / args.pattern)))
+    operation_mode = (args.operation_mode or "full").strip().lower()
+    files, selected_pattern = _resolve_source_files(source_dir, args.pattern, operation_mode)
     if not files:
-        raise SystemExit(f"대상 파일이 없습니다: {source_dir}/{args.pattern}")
+        raise SystemExit(f"대상 파일이 없습니다: {source_dir}/{selected_pattern}")
 
     release_id = args.release_id
     batch_size = max(100, args.batch_size)
     progress_step = max(5000, batch_size)
-    operation_mode = (args.operation_mode or "full").strip().lower()
     is_update_mode = operation_mode == "update"
     op_columns = [col.strip() for col in str(args.op_columns or "").split(",") if col.strip()]
     data_type = (args.data_type or "building_integrated_info").strip().lower()

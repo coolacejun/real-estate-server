@@ -20,6 +20,10 @@ from dataset_pnu_kv_store import clear_array_dataset_code
 from dataset_pnu_kv_store import delete_release_rows as delete_kv_release_rows
 from dataset_pnu_kv_store import upsert_array_payloads as upsert_kv_array_payloads
 
+LAND_MOVEMENT_DATA_TYPE = "land_info_al_d157"
+LAND_MOVEMENT_DATASET_CODE = "AL_D157"
+LAND_MOVEMENT_IDENTITY_COLUMNS = ("토지이동이력순번", "폐쇄순번", "토지이력순번")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -42,11 +46,14 @@ def parse_args() -> argparse.Namespace:
         default=int(os.getenv("LAND_INFO_IMPORT_WORKERS", "0") or "0"),
     )
     parser.add_argument("--job-id", type=int)
+    parser.add_argument("--job-total-files", type=int, default=0)
+    parser.add_argument("--keep-job-open", action="store_true", default=False)
+    parser.add_argument("--reset-job-workers", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--truncate-release", action="store_true")
     parser.add_argument("--operation-mode", default="full", choices=("full", "update"))
     parser.add_argument(
         "--op-columns",
-        default="작업구분,변경구분,변동구분,갱신구분,op,operation,crud,A8,a8",
+        default="작업구분,변경구분,변동구분,갱신구분,입력구분,op,operation,crud,A8,a8",
     )
     parser.add_argument("--mark-ready", action="store_true", default=False)
     parser.add_argument("--activate-on-complete", action="store_true", default=False)
@@ -104,8 +111,8 @@ def _iter_dict_rows(path: Path) -> Iterable[tuple[int, dict[str, str]]]:
 def _dataset_code_from_name(path: Path) -> str:
     stem = path.stem.upper()
     token = stem.split("_")[0:2]
-    if len(token) >= 2 and token[0] == "AL" and token[1].startswith("D"):
-        return "_".join(token)
+    if len(token) >= 2 and token[0] in {"AL", "CH"} and token[1].startswith("D"):
+        return "_".join(["AL", token[1]])
     return stem[:40]
 
 
@@ -158,6 +165,23 @@ def _parse_operation(payload: dict[str, str], op_columns: list[str]) -> str:
     return "none"
 
 
+def _land_movement_identity(payload: dict[str, str]) -> tuple[str, str, str, str] | None:
+    pnu = _extract_pnu(payload)
+    move_seq = str(payload.get("토지이동이력순번") or "").strip()
+    closed_seq = str(payload.get("폐쇄순번") or "").strip()
+    history_seq = str(payload.get("토지이력순번") or "").strip()
+    if not pnu or not move_seq:
+        return None
+    return (pnu, move_seq, closed_seq, history_seq)
+
+
+def _is_land_movement_update(data_type: str, dataset_code: str) -> bool:
+    return (
+        str(data_type or "").strip().lower() == LAND_MOVEMENT_DATA_TYPE
+        and str(dataset_code or "").strip().upper() == LAND_MOVEMENT_DATASET_CODE
+    )
+
+
 def update_release_status(conn: psycopg.Connection, release_id: int, status: str, records_count: int | None = None) -> None:
     if records_count is None:
         conn.execute(
@@ -196,6 +220,8 @@ def update_job(
         params.append(status)
         if status == "RUNNING":
             updates.append("started_at = COALESCE(started_at, NOW())")
+            updates.append("error_message = NULL")
+            updates.append("finished_at = NULL")
         if status in {"FAILED", "SUCCEEDED", "CANCELLED"}:
             updates.append("finished_at = NOW()")
 
@@ -429,6 +455,57 @@ def insert_land_info_slim_batch(conn: psycopg.Connection, rows: list[tuple[Any, 
                 copy.write_row(row)
 
 
+def delete_land_movement_slim_rows(
+    conn: psycopg.Connection,
+    *,
+    release_id: int,
+    keys: set[tuple[str, str, str, str]],
+) -> int:
+    normalized = sorted(
+        {
+            (
+                str(pnu or "").strip(),
+                str(move_seq or "").strip(),
+                str(closed_seq or "").strip(),
+                str(history_seq or "").strip(),
+            )
+            for pnu, move_seq, closed_seq, history_seq in keys
+            if str(pnu or "").strip() and str(move_seq or "").strip()
+        }
+    )
+    if not normalized:
+        return 0
+
+    values_sql = ", ".join(["(%s, %s, %s, %s)"] * len(normalized))
+    params: list[Any] = []
+    for key in normalized:
+        params.extend(key)
+    params.append(int(release_id))
+
+    result = conn.execute(
+        f"""
+        WITH keys(pnu, move_seq, closed_seq, history_seq) AS (
+          VALUES {values_sql}
+        )
+        DELETE FROM public.land_info_record lir
+        USING dataset_schema ds, keys k
+        WHERE lir.schema_id = ds.id
+          AND lir.release_id = %s
+          AND lir.dataset_code = 'AL_D157'
+          AND lir.pnu = k.pnu
+          AND jsonb_typeof(lir.payload_values) = 'array'
+          AND array_position(ds.columns, '토지이동이력순번') IS NOT NULL
+          AND array_position(ds.columns, '폐쇄순번') IS NOT NULL
+          AND array_position(ds.columns, '토지이력순번') IS NOT NULL
+          AND COALESCE(lir.payload_values ->> (array_position(ds.columns, '토지이동이력순번') - 1), '') = k.move_seq
+          AND COALESCE(lir.payload_values ->> (array_position(ds.columns, '폐쇄순번') - 1), '') = k.closed_seq
+          AND COALESCE(lir.payload_values ->> (array_position(ds.columns, '토지이력순번') - 1), '') = k.history_seq
+        """,
+        params,
+    )
+    return max(0, int(result.rowcount or 0))
+
+
 def activate_release(conn: psycopg.Connection, release_id: int, data_type: str, records_count: int) -> None:
     conn.execute(
         """
@@ -627,6 +704,95 @@ def _ensure_land_info_slim_table(conn: psycopg.Connection) -> None:
           ON public.land_info_record (release_id, dataset_code, pnu)
         """
     )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS land_info_record_release_dataset_pnu_id_idx
+          ON public.land_info_record (release_id, dataset_code, pnu, id)
+        """
+    )
+
+
+def ensure_dataset_import_file_table(conn: psycopg.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dataset_import_file (
+          id BIGSERIAL PRIMARY KEY,
+          release_id BIGINT NOT NULL REFERENCES cadastral_release(id) ON DELETE CASCADE,
+          data_type TEXT NOT NULL,
+          file_name TEXT NOT NULL,
+          file_size BIGINT NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS dataset_import_file_release_id_idx
+          ON dataset_import_file (release_id, id DESC)
+        """
+    )
+
+
+def load_recorded_file_names(
+    conn: psycopg.Connection,
+    *,
+    release_id: int,
+    data_type: str,
+) -> set[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT file_name
+            FROM dataset_import_file
+            WHERE release_id = %s
+              AND data_type = %s
+            """,
+            (int(release_id), str(data_type or "").strip().lower()),
+        )
+        rows = cur.fetchall()
+    return {
+        str(row[0]).strip()
+        for row in rows
+        if row and row[0] is not None and str(row[0]).strip()
+    }
+
+
+def record_import_file_name(
+    conn: psycopg.Connection,
+    *,
+    release_id: int,
+    data_type: str,
+    file_name: str,
+    file_size: int,
+) -> None:
+    normalized_name = str(file_name or "").strip()
+    normalized_type = str(data_type or "").strip().lower()
+    if not normalized_name:
+        return
+    conn.execute(
+        """
+        INSERT INTO dataset_import_file (
+          release_id, data_type, file_name, file_size
+        )
+        SELECT %s, %s, %s, %s
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM dataset_import_file
+          WHERE release_id = %s
+            AND data_type = %s
+            AND file_name = %s
+        )
+        """,
+        (
+            int(release_id),
+            normalized_type,
+            normalized_name,
+            max(0, int(file_size)),
+            int(release_id),
+            normalized_type,
+            normalized_name,
+        ),
+    )
 
 
 def _import_full_file_land_info_slim(
@@ -728,46 +894,83 @@ def _import_update_file_land_info_slim(
     dataset_code = _dataset_code_from_name(path)
     source_file = path.name
     worker_name = threading.current_thread().name
+    land_movement_update = _is_land_movement_update(data_type, dataset_code)
     rows: list[tuple[Any, ...]] = []
     pending_delete_pnus: set[str] = set()
+    pending_delete_land_movement_keys: set[tuple[str, str, str, str]] = set()
+    pending_upsert_land_movement_keys: set[tuple[str, str, str, str]] = set()
     cleared_pnus: set[str] = set()
+    cleared_land_movement_keys: set[tuple[str, str, str, str]] = set()
     inserted_rows = 0
+    deleted_rows = 0
     reported_rows = 0
     read_rows = 0
     delete_ops = 0
 
     def flush_rows(conn: psycopg.Connection) -> None:
         nonlocal inserted_rows
+        nonlocal deleted_rows
         nonlocal reported_rows
-        if not rows and not pending_delete_pnus:
+        if not rows and not pending_delete_pnus and not pending_delete_land_movement_keys:
             return
         with conn.transaction():
-            delete_pnus = sorted(set(pending_delete_pnus))
-            if delete_pnus:
-                conn.execute(
-                    """
-                    DELETE FROM public.land_info_record
-                    WHERE release_id = %s
-                      AND dataset_code = %s
-                      AND pnu = ANY(%s)
-                    """,
-                    (release_id, dataset_code, delete_pnus),
-                )
-                cleared_pnus.update(delete_pnus)
+            if land_movement_update:
+                delete_keys = set(pending_delete_land_movement_keys)
+                if delete_keys:
+                    deleted_rows += delete_land_movement_slim_rows(conn, release_id=release_id, keys=delete_keys)
+                    cleared_land_movement_keys.update(delete_keys)
 
-            upsert_all = {str(row[2]) for row in rows if row[2]}
-            upsert_pnus = sorted(pnu for pnu in upsert_all if pnu not in cleared_pnus)
-            if upsert_pnus:
-                conn.execute(
-                    """
-                    DELETE FROM public.land_info_record
-                    WHERE release_id = %s
-                      AND dataset_code = %s
-                      AND pnu = ANY(%s)
-                    """,
-                    (release_id, dataset_code, upsert_pnus),
-                )
-                cleared_pnus.update(upsert_pnus)
+                upsert_keys = {
+                    key
+                    for key in pending_upsert_land_movement_keys
+                    if key not in cleared_land_movement_keys
+                }
+                if upsert_keys:
+                    deleted_rows += delete_land_movement_slim_rows(conn, release_id=release_id, keys=upsert_keys)
+                    cleared_land_movement_keys.update(upsert_keys)
+
+                fallback_delete_pnus = sorted(set(pending_delete_pnus))
+                if fallback_delete_pnus:
+                    result = conn.execute(
+                        """
+                        DELETE FROM public.land_info_record
+                        WHERE release_id = %s
+                          AND dataset_code = %s
+                          AND pnu = ANY(%s)
+                        """,
+                        (release_id, dataset_code, fallback_delete_pnus),
+                    )
+                    deleted_rows += max(0, int(result.rowcount or 0))
+                    cleared_pnus.update(fallback_delete_pnus)
+            else:
+                delete_pnus = sorted(set(pending_delete_pnus))
+                if delete_pnus:
+                    result = conn.execute(
+                        """
+                        DELETE FROM public.land_info_record
+                        WHERE release_id = %s
+                          AND dataset_code = %s
+                          AND pnu = ANY(%s)
+                        """,
+                        (release_id, dataset_code, delete_pnus),
+                    )
+                    deleted_rows += max(0, int(result.rowcount or 0))
+                    cleared_pnus.update(delete_pnus)
+
+                upsert_all = {str(row[2]) for row in rows if row[2]}
+                upsert_pnus = sorted(pnu for pnu in upsert_all if pnu not in cleared_pnus)
+                if upsert_pnus:
+                    result = conn.execute(
+                        """
+                        DELETE FROM public.land_info_record
+                        WHERE release_id = %s
+                          AND dataset_code = %s
+                          AND pnu = ANY(%s)
+                        """,
+                        (release_id, dataset_code, upsert_pnus),
+                    )
+                    deleted_rows += max(0, int(result.rowcount or 0))
+                    cleared_pnus.update(upsert_pnus)
 
             if rows:
                 insert_land_info_slim_batch(conn, rows)
@@ -780,6 +983,8 @@ def _import_update_file_land_info_slim(
                 reported_rows = 0
         rows.clear()
         pending_delete_pnus.clear()
+        pending_delete_land_movement_keys.clear()
+        pending_upsert_land_movement_keys.clear()
 
     with psycopg.connect(db_url, autocommit=True) as conn:
         schema_registry = DatasetSchemaRegistry(conn, data_type)
@@ -797,14 +1002,33 @@ def _import_update_file_land_info_slim(
                 op = _parse_operation(payload, op_columns)
                 if op == "delete":
                     delete_ops += 1
-                    pending_delete_pnus.add(pnu)
-                    if rows:
-                        rows[:] = [row for row in rows if str(row[2]) != pnu]
-                    if len(pending_delete_pnus) >= batch_size:
+                    if land_movement_update:
+                        identity = _land_movement_identity(payload)
+                        if identity:
+                            if rows:
+                                flush_rows(conn)
+                            pending_delete_land_movement_keys.add(identity)
+                            pending_upsert_land_movement_keys.discard(identity)
+                        else:
+                            pending_delete_pnus.add(pnu)
+                    else:
+                        pending_delete_pnus.add(pnu)
+                        if rows:
+                            rows[:] = [row for row in rows if str(row[2]) != pnu]
+                    if (
+                        len(pending_delete_pnus)
+                        + len(pending_delete_land_movement_keys)
+                    ) >= batch_size:
                         flush_rows(conn)
                     continue
 
                 schema_id, payload_values = schema_registry.encode_payload(dataset_code, payload)
+                if land_movement_update:
+                    identity = _land_movement_identity(payload)
+                    if identity:
+                        pending_upsert_land_movement_keys.add(identity)
+                    else:
+                        pending_delete_pnus.add(pnu)
                 rows.append((release_id, dataset_code, pnu, schema_id, payload_values))
                 if len(rows) >= batch_size:
                     flush_rows(conn)
@@ -834,6 +1058,7 @@ def _import_update_file_land_info_slim(
     return {
         "file": source_file,
         "inserted_rows": inserted_rows,
+        "deleted_rows": deleted_rows,
     }
 
 
@@ -1183,8 +1408,10 @@ def main() -> int:
     # Default to land_info_slim to reduce disk usage while keeping indexed PNU query performance.
     store_mode = "land_info_slim" if store_mode_raw == "auto" else store_mode_raw
     inserted_total = 0
+    deleted_total = 0
     processed_files = 0
     release_is_active = False
+    release_records_count = 0
 
     requested_workers = int(args.workers or 0)
     worker_count = _resolve_worker_count(requested_workers)
@@ -1204,24 +1431,57 @@ def main() -> int:
     try:
         with psycopg.connect(db_url, autocommit=True) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT data_type, is_active FROM cadastral_release WHERE id = %s", (release_id,))
+                cur.execute("SELECT data_type, is_active, records_count FROM cadastral_release WHERE id = %s", (release_id,))
                 row = cur.fetchone()
                 if not row:
                     raise RuntimeError(f"release not found: {release_id}")
                 data_type = str(row[0] or data_type or "land_info").strip().lower()
                 release_is_active = bool(row[1])
+                release_records_count = int(row[2] or 0)
 
             if store_mode == "land_info_slim":
                 _ensure_land_info_slim_table(conn)
+                ensure_dataset_import_file_table(conn)
+                if is_update_mode:
+                    recorded_files = load_recorded_file_names(
+                        conn,
+                        release_id=release_id,
+                        data_type=data_type,
+                    )
+                    skipped_files: list[str] = []
+                    pending_files: list[Path] = []
+                    for path in files:
+                        if path.name in recorded_files:
+                            skipped_files.append(path.name)
+                            continue
+                        pending_files.append(path)
+                    files = pending_files
+                    if skipped_files:
+                        preview = ", ".join(skipped_files[:5])
+                        suffix = "" if len(skipped_files) <= 5 else f", ... +{len(skipped_files) - 5}"
+                        print(
+                            f"[INFO] update 중복 파일 스킵: count={len(skipped_files)}, files={preview}{suffix}",
+                            flush=True,
+                        )
                 with conn.transaction():
                     update_release_status(conn, release_id, "IMPORTING")
                     if args.job_id is not None:
-                        update_job(conn, args.job_id, status="RUNNING", total_files=len(files))
-                        reset_job_worker_progress(conn, args.job_id, files)
+                        total_files = int(args.job_total_files or 0) or len(files)
+                        update_job(conn, args.job_id, status="RUNNING", total_files=total_files)
+                        if args.reset_job_workers:
+                            reset_job_worker_progress(conn, args.job_id, files)
 
                 if args.truncate_release:
                     with conn.transaction():
                         conn.execute("DELETE FROM public.land_info_record WHERE release_id = %s", (release_id,))
+                        conn.execute(
+                            """
+                            DELETE FROM dataset_import_file
+                            WHERE release_id = %s
+                              AND data_type = %s
+                            """,
+                            (release_id, data_type),
+                        )
 
                 import_fn = _import_update_file_land_info_slim if is_update_mode else _import_full_file_land_info_slim
                 if parallel_full_mode:
@@ -1253,6 +1513,14 @@ def main() -> int:
                                 raise RuntimeError(f"{path.name} 처리 실패: {exc}") from exc
                             inserted_total += int(result.get("inserted_rows") or 0)
                             processed_files += 1
+                            with conn.transaction():
+                                record_import_file_name(
+                                    conn,
+                                    release_id=release_id,
+                                    data_type=data_type,
+                                    file_name=path.name,
+                                    file_size=path.stat().st_size,
+                                )
                             print(
                                 f"[OK] {result.get('file', path.name)} 처리 완료 (누적 rows: {inserted_total})",
                                 flush=True,
@@ -1283,43 +1551,57 @@ def main() -> int:
                                 progress_step,
                             )
                         inserted_total += int(result.get("inserted_rows") or 0)
+                        deleted_total += int(result.get("deleted_rows") or 0)
                         processed_files += 1
+                        with conn.transaction():
+                            record_import_file_name(
+                                conn,
+                                release_id=release_id,
+                                data_type=data_type,
+                                file_name=path.name,
+                                file_size=path.stat().st_size,
+                            )
                         print(
                             f"[OK] {result.get('file', path.name)} 완료 (누적 rows: {inserted_total})",
                             flush=True,
                         )
 
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT COUNT(*)
-                        FROM public.land_info_record
-                        WHERE release_id = %s
-                        """,
-                        (release_id,),
-                    )
-                    row = cur.fetchone()
-                    final_records = int(row[0] or 0) if row else 0
-
-                with conn.transaction():
-                    if args.activate_on_complete:
-                        activate_release(conn, release_id, data_type, final_records)
+                final_records = 0
+                if not args.keep_job_open:
+                    if is_update_mode and release_is_active:
+                        final_records = max(0, release_records_count + inserted_total - deleted_total)
                     else:
-                        final_status = (
-                            "ACTIVE"
-                            if (args.mark_ready and release_is_active)
-                            else ("READY" if args.mark_ready else "IMPORTING")
-                        )
-                        update_release_status(conn, release_id, final_status, records_count=final_records)
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """
+                                SELECT COUNT(*)
+                                FROM public.land_info_record
+                                WHERE release_id = %s
+                                """,
+                                (release_id,),
+                            )
+                            row = cur.fetchone()
+                            final_records = int(row[0] or 0) if row else 0
 
-                    if args.job_id is not None:
-                        update_job(
-                            conn,
-                            args.job_id,
-                            status="SUCCEEDED",
-                            inserted_rows=inserted_total,
-                            error_message="",
-                        )
+                    with conn.transaction():
+                        if args.activate_on_complete:
+                            activate_release(conn, release_id, data_type, final_records)
+                        else:
+                            final_status = (
+                                "ACTIVE"
+                                if (args.mark_ready and release_is_active)
+                                else ("READY" if args.mark_ready else "IMPORTING")
+                            )
+                            update_release_status(conn, release_id, final_status, records_count=final_records)
+
+                        if args.job_id is not None:
+                            update_job(
+                                conn,
+                                args.job_id,
+                                status="SUCCEEDED",
+                                inserted_rows=inserted_total,
+                                error_message="",
+                            )
 
                 if split_meta_entries:
                     source_row_count = sum(int(item.get("source_row_count") or 0) for item in split_meta_entries)
@@ -1347,8 +1629,10 @@ def main() -> int:
                 with conn.transaction():
                     update_release_status(conn, release_id, "IMPORTING")
                     if args.job_id is not None:
-                        update_job(conn, args.job_id, status="RUNNING", total_files=len(files))
-                        reset_job_worker_progress(conn, args.job_id, files)
+                        total_files = int(args.job_total_files or 0) or len(files)
+                        update_job(conn, args.job_id, status="RUNNING", total_files=total_files)
+                        if args.reset_job_workers:
+                            reset_job_worker_progress(conn, args.job_id, files)
 
                 if args.truncate_release:
                     with conn.transaction():
@@ -1452,7 +1736,7 @@ def main() -> int:
                         )
                         update_release_status(conn, release_id, final_status, records_count=final_records)
 
-                    if args.job_id is not None:
+                    if args.job_id is not None and not args.keep_job_open:
                         update_job(
                             conn,
                             args.job_id,
@@ -1487,8 +1771,10 @@ def main() -> int:
                 schema_registry.ensure_release_partition(release_id)
                 update_release_status(conn, release_id, "IMPORTING")
                 if args.job_id is not None:
-                    update_job(conn, args.job_id, status="RUNNING", total_files=len(files))
-                    reset_job_worker_progress(conn, args.job_id, files)
+                    total_files = int(args.job_total_files or 0) or len(files)
+                    update_job(conn, args.job_id, status="RUNNING", total_files=total_files)
+                    if args.reset_job_workers:
+                        reset_job_worker_progress(conn, args.job_id, files)
 
             if args.truncate_release:
                 with conn.transaction():
@@ -1661,7 +1947,7 @@ def main() -> int:
                             count_row = cur.fetchone()
                             final_records = int(count_row[0] or 0) if count_row else 0
                     update_release_status(conn, release_id, final_status, records_count=final_records)
-                if args.job_id is not None:
+                if args.job_id is not None and not args.keep_job_open:
                     update_job(
                         conn,
                         args.job_id,

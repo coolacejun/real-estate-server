@@ -28,6 +28,7 @@ backup/
 
 # Temporary/editor/OS
 .DS_Store
+.idea/
 *.log
 
 # Large source links (mounted data)
@@ -37,5 +38,7 @@ backup/
 토지정보
 
 # Local backup / spreadsheet artifacts
+*.bak
+*.bak.*
 *.bak_*
 *.xlsx

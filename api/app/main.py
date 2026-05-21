@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import datetime as dt
 import fnmatch
 import gzip
 import hashlib
@@ -16,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from collections import OrderedDict, deque
 from io import BytesIO
 from pathlib import Path
@@ -90,6 +92,8 @@ def _read_log_tail_lines(path: Path, limit: int) -> list[str]:
 
 _configure_server_log_file_handler()
 
+logger = logging.getLogger("site_plan_report")
+
 
 def ok(data: Any) -> Dict[str, Any]:
     return {"ok": True, "data": data, "error": None}
@@ -144,6 +148,32 @@ _ACTIVE_RELEASE_CACHE: dict[str, Any] = {
     "release_by_type": {},
 }
 _DATA_TYPE_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
+LAND_INFO_COMPONENTS: dict[str, dict[str, str]] = {
+    "AL_D155": {
+        "data_type": "land_info_al_d155",
+        "key": "land_use_plan",
+        "name": "토지이용계획",
+    },
+    "AL_D157": {
+        "data_type": "land_info_al_d157",
+        "key": "land_movement",
+        "name": "토지이동",
+    },
+    "AL_D161": {
+        "data_type": "land_info_al_d161",
+        "key": "land_ownership",
+        "name": "토지소유",
+    },
+    "AL_D195": {
+        "data_type": "land_info_al_d195",
+        "key": "land_characteristic",
+        "name": "토지특성",
+    },
+}
+LAND_INFO_DATA_TYPE_TO_CODE: dict[str, str] = {
+    item["data_type"]: code for code, item in LAND_INFO_COMPONENTS.items()
+}
+LAND_INFO_COMPONENT_DATA_TYPES = set(LAND_INFO_DATA_TYPE_TO_CODE)
 VALID_RELEASE_STATUSES = {
     "PENDING",
     "IMPORTING",
@@ -436,6 +466,26 @@ def _normalize_data_type(value: str | None, default: str = "cadastral") -> str:
     return normalized
 
 
+def _land_info_component_code_for_data_type(data_type: str | None) -> str | None:
+    normalized = str(data_type or "").strip().lower().replace("-", "_")
+    return LAND_INFO_DATA_TYPE_TO_CODE.get(normalized)
+
+
+def _land_info_component_data_type_for_code(dataset_code: Any) -> str | None:
+    component = LAND_INFO_COMPONENTS.get(str(dataset_code or "").strip().upper())
+    return component["data_type"] if component else None
+
+
+def _is_land_info_component_data_type(data_type: str | None) -> bool:
+    normalized = str(data_type or "").strip().lower().replace("-", "_")
+    return normalized in LAND_INFO_COMPONENT_DATA_TYPES
+
+
+def _is_land_info_family_data_type(data_type: str | None) -> bool:
+    normalized = str(data_type or "").strip().lower().replace("-", "_")
+    return normalized == "land_info" or normalized in LAND_INFO_COMPONENT_DATA_TYPES
+
+
 def _data_type_env_suffix(data_type: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", data_type).upper()
 
@@ -452,6 +502,9 @@ def _default_import_pattern_for_data_type(data_type: str) -> str:
         "building_integrated_info": "AL_D010*.json",
         "land_info": "AL_D1*.csv",
     }
+    component_code = _land_info_component_code_for_data_type(data_type)
+    if component_code:
+        return f"{component_code}*.csv"
     return defaults.get(data_type, "*")
 
 
@@ -496,6 +549,8 @@ def _import_script_path_for_data_type(data_type: str) -> str:
         ),
         "land_info": os.getenv("LAND_INFO_IMPORT_SCRIPT_PATH", "/scripts/import_land_info_csv.py"),
     }
+    if _is_land_info_component_data_type(data_type):
+        return os.getenv("LAND_INFO_IMPORT_SCRIPT_PATH", "/scripts/import_land_info_csv.py")
     if data_type in defaults:
         return defaults[data_type]
 
@@ -520,6 +575,8 @@ def _choose_import_pattern(upload_dir: Path, data_type: str) -> str:
         return "*.json"
     if any(name.lower().endswith(".geojson") for name in names):
         return "*.geojson"
+    if any(name.lower().endswith(".csv") for name in names):
+        return "*.csv"
 
     raise HTTPException(status_code=400, detail=f"업로드된 파일에서 적재 가능한 파일을 찾을 수 없습니다: data_type={data_type}")
 
@@ -545,9 +602,12 @@ def _candidate_import_patterns_for_data_type(data_type: str) -> list[str]:
         "cadastral": ["AL_D002*.json", "*.json", "*.geojson"],
         "building_info": ["*.txt"],
         "building_integrated_info": ["AL_D010*.json", "*.json", "*.geojson"],
-        "land_info": ["AL_D1*.csv", "*.csv"],
+        "land_info": ["AL_D1*.csv", "CH_D1*.csv", "*.csv"],
     }
     candidates.extend(typed_patterns.get(normalized, []))
+    component_code = _land_info_component_code_for_data_type(normalized)
+    if component_code:
+        candidates.extend([f"{component_code}*.csv", "*.csv"])
 
     unique: list[str] = []
     seen: set[str] = set()
@@ -566,7 +626,7 @@ def _detect_import_pattern(upload_dir: Path, data_type: str) -> str | None:
         if _count_pattern_files(upload_dir, pattern) > 0:
             return pattern
 
-    if normalized in {"cadastral", "building_info", "building_integrated_info", "land_info"}:
+    if normalized in {"cadastral", "building_info", "building_integrated_info", "land_info"} or _is_land_info_component_data_type(normalized):
         return None
 
     try:
@@ -594,6 +654,9 @@ def _default_source_dir_for_data_type(data_type: str, operation_mode: str = "ful
         "building_integrated_info": f"/data/source/building_integrated_info/{mode}",
         "land_info": f"/data/source/land_info/{mode}",
     }
+    component_code = _land_info_component_code_for_data_type(normalized)
+    if component_code:
+        return Path(f"/data/source/land_info/{component_code}/{mode}").resolve()
     return Path(defaults.get(normalized, f"/data/source/{normalized}/{mode}")).resolve()
 
 
@@ -1079,6 +1142,9 @@ def _clear_active_release_cache(data_type: str | None = None) -> None:
         normalized_type = _normalize_data_type(data_type)
         _ACTIVE_RELEASE_CACHE["loaded_at_by_type"].pop(normalized_type, None)
         _ACTIVE_RELEASE_CACHE["release_by_type"].pop(normalized_type, None)
+        if normalized_type == "land_info" or normalized_type in LAND_INFO_COMPONENT_DATA_TYPES:
+            _ACTIVE_RELEASE_CACHE["loaded_at_by_type"].pop("land_info_components", None)
+            _ACTIVE_RELEASE_CACHE["release_by_type"].pop("land_info_components", None)
 
 
 def _active_release(data_type: str = "cadastral", force_refresh: bool = False) -> dict[str, Any] | None:
@@ -1098,6 +1164,65 @@ def _active_release(data_type: str = "cadastral", force_refresh: bool = False) -
         _ACTIVE_RELEASE_CACHE["release_by_type"][normalized_type] = release
 
     return release
+
+
+def _query_active_land_info_component_releases_uncached() -> dict[str, dict[str, Any]]:
+    component_types = sorted(LAND_INFO_COMPONENT_DATA_TYPES)
+    if not component_types:
+        return {}
+    try:
+        with psycopg.connect(_db_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, version, status, activated_at, data_type, metadata, records_count
+                    FROM cadastral_release
+                    WHERE is_active = TRUE
+                      AND data_type = ANY(%s)
+                    ORDER BY activated_at DESC NULLS LAST, id DESC
+                    """,
+                    (component_types,),
+                )
+                rows = cur.fetchall()
+    except Exception:
+        return {}
+
+    by_code: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        code = _land_info_component_code_for_data_type(str(row[4] or ""))
+        if not code or code in by_code:
+            continue
+        metadata = row[5] if isinstance(row[5], dict) else {}
+        by_code[code] = {
+            "id": row[0],
+            "version": row[1],
+            "status": row[2],
+            "activated_at": row[3],
+            "data_type": row[4],
+            "metadata": metadata,
+            "records_count": int(row[6] or 0),
+            "dataset_code": code,
+            "dataset_name": LAND_INFO_COMPONENTS.get(code, {}).get("name"),
+        }
+    return by_code
+
+
+def _active_land_info_component_releases(force_refresh: bool = False) -> dict[str, dict[str, Any]]:
+    cache_key = "land_info_components"
+    now = time.time()
+    with _ACTIVE_RELEASE_CACHE_LOCK:
+        loaded_at_by_type: dict[str, float] = _ACTIVE_RELEASE_CACHE["loaded_at_by_type"]
+        release_by_type: dict[str, Any] = _ACTIVE_RELEASE_CACHE["release_by_type"]
+        loaded_at = loaded_at_by_type.get(cache_key, 0.0)
+        if not force_refresh and (now - loaded_at) < _ACTIVE_RELEASE_CACHE_TTL:
+            cached = release_by_type.get(cache_key)
+            return cached if isinstance(cached, dict) else {}
+
+    releases = _query_active_land_info_component_releases_uncached()
+    with _ACTIVE_RELEASE_CACHE_LOCK:
+        _ACTIVE_RELEASE_CACHE["loaded_at_by_type"][cache_key] = now
+        _ACTIVE_RELEASE_CACHE["release_by_type"][cache_key] = releases
+    return releases
 
 
 def _tile_memory_cache() -> LruBytesCache:
@@ -3091,9 +3216,227 @@ def _fetch_building_info_line(pnu: str) -> str | None:
     return None
 
 
+def _land_info_rows_to_records(rows: list[tuple[Any, ...]]) -> list[Dict[str, Any]]:
+    if not rows:
+        return []
+    schema_columns_by_id = _load_dataset_schema_columns(
+        [int(row[1]) for row in rows if row[1] is not None]
+    )
+    return [
+        {
+            "dataset_code": row[0],
+            "payload": _decode_dataset_payload(
+                payload_raw=None,
+                schema_id_raw=row[1],
+                payload_values_raw=row[2],
+                schema_columns_by_id=schema_columns_by_id,
+            ),
+            "geometry": None,
+            "source_file": None,
+            "row_no": None,
+        }
+        for row in rows
+    ]
+
+
+def _land_info_payload_pick(payload: dict[str, Any], keys: list[str], default: str = "") -> str:
+    for key in keys:
+        value = payload.get(key)
+        text = str(value or "").strip()
+        if text:
+            return text
+    return default
+
+
+def _land_info_legacy_csv_value(value: Any, default: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        text = default
+    return text.replace("\r", " ").replace("\n", " ").replace(",", " ")
+
+
+def _land_info_legacy_digits(value: Any, default: str = "0") -> str:
+    digits = re.sub(r"[^0-9]", "", str(value or ""))
+    return digits or default
+
+
+def _land_info_legacy_line(values: list[Any]) -> str:
+    return ",".join(_land_info_legacy_csv_value(value) for value in values)
+
+
+def _land_info_records_to_legacy_payload(records: list[Dict[str, Any]]) -> dict[str, list[str]]:
+    legacy: dict[str, list[str]] = {
+        "landCharacteristic": [],
+        "landUse": [],
+        "landPossession": [],
+        "landMove": [],
+    }
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        dataset_code = str(record.get("dataset_code") or "").strip().upper()
+        payload_raw = record.get("payload")
+        if not isinstance(payload_raw, dict):
+            continue
+        payload = {str(key): value for key, value in payload_raw.items()}
+
+        if dataset_code == "AL_D195":
+            legacy["landCharacteristic"].append(
+                _land_info_legacy_line(
+                    [
+                        _land_info_payload_pick(payload, ["지목명", "지목"]),
+                        _land_info_payload_pick(payload, ["토지면적", "대장면적", "면적"], "0"),
+                        _land_info_legacy_digits(
+                            _land_info_payload_pick(payload, ["공시지가", "공시지가(원/㎡)", "지가"]),
+                        ),
+                        _land_info_payload_pick(payload, ["토지이용상황"]),
+                        _land_info_payload_pick(payload, ["지형높이"]),
+                        _land_info_payload_pick(payload, ["지형형상"]),
+                        _land_info_payload_pick(payload, ["도로접면"]),
+                        _land_info_payload_pick(payload, ["용도지역명1", "용도지역지구명"]),
+                        _land_info_payload_pick(payload, ["용도지역명2"]),
+                        _land_info_legacy_digits(
+                            _land_info_payload_pick(payload, ["기준년월", "등록일자", "데이터기준일자"]),
+                        ),
+                    ]
+                )
+            )
+        elif dataset_code == "AL_D155":
+            legacy["landUse"].append(
+                _land_info_legacy_line(
+                    [
+                        _land_info_payload_pick(payload, ["저촉여부", "저촉여부코드"]),
+                        _land_info_payload_pick(payload, ["용도지역지구코드"]),
+                        _land_info_payload_pick(payload, ["용도지역지구명"]),
+                        _land_info_payload_pick(payload, ["등록일자", "데이터기준일자"]),
+                        _land_info_payload_pick(payload, ["비고내용"]),
+                    ]
+                )
+            )
+        elif dataset_code == "AL_D161":
+            legacy["landPossession"].append(
+                _land_info_legacy_line(
+                    [
+                        _land_info_payload_pick(payload, ["소유구분"]),
+                        _land_info_payload_pick(payload, ["거주지구분"]),
+                        _land_info_payload_pick(payload, ["소유권변동원인"]),
+                        _land_info_payload_pick(payload, ["소유권변동일자"]),
+                        _land_info_payload_pick(payload, ["공유인수"], "0"),
+                        _land_info_payload_pick(payload, ["집합건물일련번호"], "0000"),
+                        _land_info_payload_pick(payload, ["기준일", "데이터기준일자", "기준연월"]),
+                    ]
+                )
+            )
+        elif dataset_code == "AL_D157":
+            legacy["landMove"].append(
+                _land_info_legacy_line(
+                    [
+                        _land_info_payload_pick(payload, ["지목", "지목명"]),
+                        _land_info_payload_pick(payload, ["토지이동사유"]),
+                        _land_info_payload_pick(payload, ["토지이동일자"]),
+                        _land_info_payload_pick(payload, ["토지이력순번", "토지이동이력순번"]),
+                        _land_info_payload_pick(payload, ["데이터기준일자"]),
+                    ]
+                )
+            )
+    return legacy
+
+
+def _fetch_land_info_component_records(pnu: str, limit: int) -> list[Dict[str, Any]]:
+    safe_limit = max(1, min(2000, int(limit)))
+    pnu_candidates = _pnu_query_candidates(pnu)
+    if not pnu_candidates:
+        return []
+
+    component_releases = _active_land_info_component_releases()
+    monolith_release = _active_release("land_info")
+    release_pairs: list[tuple[str, int]] = []
+    for code in sorted(LAND_INFO_COMPONENTS):
+        release = component_releases.get(code)
+        if release and release.get("id") is not None:
+            release_pairs.append((code, int(release["id"])))
+        elif monolith_release and monolith_release.get("id") is not None:
+            release_pairs.append((code, int(monolith_release["id"])))
+
+    if not release_pairs and monolith_release and monolith_release.get("id") is not None:
+        release_pairs = [("", int(monolith_release["id"]))]
+    if not release_pairs:
+        return []
+
+    try:
+        with psycopg.connect(_db_url()) as conn:
+            land_rows: list[tuple[Any, ...]] = []
+            for candidate_pnu in pnu_candidates:
+                with conn.cursor() as cur:
+                    if len(release_pairs) == 1 and not release_pairs[0][0]:
+                        cur.execute(
+                            """
+                            SELECT dataset_code, schema_id, payload_values
+                            FROM public.land_info_record
+                            WHERE release_id = %s
+                              AND pnu = %s
+                            ORDER BY dataset_code, id
+                            LIMIT %s
+                            """,
+                            (release_pairs[0][1], candidate_pnu, safe_limit),
+                        )
+                        land_rows = cur.fetchall()
+                    else:
+                        collected_rows: list[tuple[Any, ...]] = []
+                        seen_ids: set[int] = set()
+                        for dataset_code, release_id in release_pairs:
+                            cur.execute(
+                                """
+                                SELECT id, dataset_code, schema_id, payload_values
+                                FROM public.land_info_record
+                                WHERE release_id = %s
+                                  AND dataset_code = %s
+                                  AND pnu = %s
+                                ORDER BY id
+                                LIMIT 1
+                                """,
+                                (release_id, dataset_code, candidate_pnu),
+                            )
+                            for row in cur.fetchall():
+                                seen_ids.add(int(row[0]))
+                                collected_rows.append((row[1], row[2], row[3]))
+                        for dataset_code, release_id in release_pairs:
+                            remaining = safe_limit - len(collected_rows)
+                            if remaining <= 0:
+                                break
+                            cur.execute(
+                                """
+                                SELECT id, dataset_code, schema_id, payload_values
+                                FROM public.land_info_record
+                                WHERE release_id = %s
+                                  AND dataset_code = %s
+                                  AND pnu = %s
+                                  AND NOT (id = ANY(%s))
+                                ORDER BY id
+                                LIMIT %s
+                                """,
+                                (release_id, dataset_code, candidate_pnu, sorted(seen_ids), remaining),
+                            )
+                            for row in cur.fetchall():
+                                seen_ids.add(int(row[0]))
+                                collected_rows.append((row[1], row[2], row[3]))
+                        land_rows = collected_rows
+                if land_rows:
+                    break
+    except Exception:
+        land_rows = []
+
+    return _land_info_rows_to_records(land_rows)
+
+
 def _fetch_dataset_records(data_type: str, pnu: str, limit: int = 300) -> list[Dict[str, Any]]:
     safe_limit = max(1, min(2000, int(limit)))
     normalized_type = _normalize_data_type(data_type)
+
+    if normalized_type == "land_info":
+        component_records = _fetch_land_info_component_records(pnu, safe_limit)
+        if component_records:
+            return component_records[:safe_limit]
 
     kv_payload = _fetch_dataset_pnu_kv_payload(normalized_type, pnu)
     kv_records = _normalize_pnu_kv_records(kv_payload)
@@ -3106,49 +3449,6 @@ def _fetch_dataset_records(data_type: str, pnu: str, limit: int = 300) -> list[D
     pnu_candidates = _pnu_query_candidates(pnu)
     if not pnu_candidates:
         return []
-
-    if normalized_type == "land_info":
-        try:
-            with psycopg.connect(_db_url()) as conn:
-                land_rows: list[tuple[Any, ...]] = []
-                for candidate_pnu in pnu_candidates:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            SELECT dataset_code, schema_id, payload_values
-                            FROM public.land_info_record
-                            WHERE release_id = %s
-                              AND pnu = %s
-                            ORDER BY id
-                            LIMIT %s
-                            """,
-                            (active_release["id"], candidate_pnu, safe_limit),
-                        )
-                        land_rows = cur.fetchall()
-                    if land_rows:
-                        break
-        except Exception:
-            land_rows = []
-
-        if land_rows:
-            schema_columns_by_id = _load_dataset_schema_columns(
-                [int(row[1]) for row in land_rows if row[1] is not None]
-            )
-            return [
-                {
-                    "dataset_code": row[0],
-                    "payload": _decode_dataset_payload(
-                        payload_raw=None,
-                        schema_id_raw=row[1],
-                        payload_values_raw=row[2],
-                        schema_columns_by_id=schema_columns_by_id,
-                    ),
-                    "geometry": None,
-                    "source_file": None,
-                    "row_no": None,
-                }
-                for row in land_rows
-            ]
 
     try:
         with psycopg.connect(_db_url()) as conn:
@@ -4494,6 +4794,8 @@ def _parallel_worker_config(data_type: str) -> tuple[str, int]:
         env_keys.insert(0, "BUILDING_INTEGRATED_INFO_IMPORT_WORKERS")
     elif normalized == "land_info":
         env_keys.insert(0, "LAND_INFO_IMPORT_WORKERS")
+    elif normalized in LAND_INFO_COMPONENT_DATA_TYPES:
+        env_keys.insert(0, "LAND_INFO_IMPORT_WORKERS")
 
     for key in env_keys:
         raw = os.getenv(key, "").strip()
@@ -4736,7 +5038,7 @@ async def _start_import_job_runner(
         raise HTTPException(status_code=400, detail=f"invalid operation_mode: {operation_mode}")
     merge_mode = bool(merge_by_pnu) and normalized_type == "building_info"
     truncate_mode = bool(truncate_release) and not merge_mode
-    parallel_capable_types = {"building_info", "cadastral", "building_integrated_info", "land_info"}
+    parallel_capable_types = {"building_info", "cadastral", "building_integrated_info", "land_info", *LAND_INFO_COMPONENT_DATA_TYPES}
     parallel_import_enabled = (
         normalized_type in parallel_capable_types
         and normalized_operation_mode == "full"
@@ -4927,6 +5229,1913 @@ def admin_logs_page() -> Response:
 @app.get("/admin/logs/")
 def admin_logs_page_slash() -> Response:
     return admin_logs_page()
+
+
+def _building_hub_sync_dir() -> Path:
+    return Path(os.getenv("BUILDING_HUB_SYNC_DIR", "/data/source/building_info_hub")).resolve()
+
+
+def _cadastral_sync_dir() -> Path:
+    return Path(os.getenv("CADASTRAL_SYNC_BASE_DIR", "/data/uploads/연속지적/auto")).resolve()
+
+
+def _building_integrated_sync_dir() -> Path:
+    return Path(os.getenv("BUILDING_INTEGRATED_SYNC_BASE_DIR", "/data/source/building_integrated_info/auto")).resolve()
+
+
+def _land_movement_sync_dir() -> Path:
+    return Path(os.getenv("LAND_MOVEMENT_SYNC_BASE_DIR", "/data/source/land_info/auto/land_movement")).resolve()
+
+
+def _land_info_sync_dir() -> Path:
+    return Path(os.getenv("LAND_INFO_SYNC_BASE_DIR", "/data/source/land_info/auto")).resolve()
+
+
+def _land_info_worker_dir() -> Path:
+    return Path(os.getenv("LAND_INFO_WORKER_DIR", "/worker/land-info-worker")).resolve()
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.exists() or not path.is_file():
+            return None
+        with path.open("r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _path_modified_at(path: Path) -> str | None:
+    try:
+        return dt.datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
+    except Exception:
+        return None
+
+
+def _path_file_size(path: Path) -> int:
+    try:
+        return int(path.stat().st_size)
+    except Exception:
+        return 0
+
+
+def _path_mtime(path: Path) -> float:
+    try:
+        return float(path.stat().st_mtime)
+    except Exception:
+        return 0.0
+
+
+def _recent_path_items(root: Path, pattern: str, *, limit: int = 8, recursive: bool = False) -> dict[str, Any]:
+    paths: list[Path] = []
+    try:
+        if root.exists() and root.is_dir():
+            iterator = root.rglob(pattern) if recursive else root.glob(pattern)
+            paths = [path for path in iterator if path.is_file()]
+    except Exception:
+        paths = []
+
+    paths.sort(key=_path_mtime, reverse=True)
+    total_size = 0
+    latest_mtime = 0.0
+    for path in paths:
+        try:
+            stat = path.stat()
+        except Exception:
+            continue
+        total_size += int(stat.st_size)
+        latest_mtime = max(latest_mtime, float(stat.st_mtime))
+
+    items = []
+    for path in paths[:limit]:
+        items.append(
+            {
+                "name": path.name,
+                "path": str(path),
+                "parent": path.parent.name,
+                "size": _path_file_size(path),
+                "modified_at": _path_modified_at(path),
+            }
+        )
+
+    return {
+        "count": len(paths),
+        "total_size": total_size,
+        "latest_modified_at": (
+            dt.datetime.fromtimestamp(latest_mtime).astimezone().isoformat(timespec="seconds")
+            if latest_mtime > 0
+            else None
+        ),
+        "items": items,
+    }
+
+
+def _cadastral_sync_local_work(sync_dir: Path) -> dict[str, Any]:
+    raw = _recent_path_items(sync_dir / "raw", "*.zip", limit=8)
+    staging = _recent_path_items(sync_dir / "staging", "*.geojson", limit=8, recursive=True)
+    manifests = _recent_path_items(sync_dir / "manifests", "*.json", limit=5)
+
+    latest_stage_dir = None
+    stage_dirs: list[Path] = []
+    try:
+        staging_dir = sync_dir / "staging"
+        if staging_dir.exists() and staging_dir.is_dir():
+            stage_dirs = [path for path in staging_dir.iterdir() if path.is_dir()]
+    except Exception:
+        stage_dirs = []
+    if stage_dirs:
+        latest = max(stage_dirs, key=lambda path: path.stat().st_mtime if path.exists() else 0)
+        latest_stage_dir = {
+            "name": latest.name,
+            "path": str(latest),
+            "modified_at": _path_modified_at(latest),
+        }
+
+    latest_activity_at = max(
+        [value for value in (raw.get("latest_modified_at"), staging.get("latest_modified_at"), manifests.get("latest_modified_at")) if value],
+        default=None,
+    )
+    failed_log = sync_dir / "failed_wgs84" / "failed.txt"
+    failed_tail: list[str] = []
+    try:
+        if failed_log.exists():
+            failed_tail = [line for line in failed_log.read_text(encoding="utf-8", errors="replace").splitlines() if line][-5:]
+    except Exception:
+        failed_tail = []
+
+    return {
+        "sync_dir": str(sync_dir),
+        "raw": raw,
+        "staging": staging,
+        "manifests": manifests,
+        "latest_stage_dir": latest_stage_dir,
+        "latest_activity_at": latest_activity_at,
+        "failed_tail": failed_tail,
+    }
+
+
+def _land_info_sync_local_work(sync_dir: Path, worker_dir: Path) -> dict[str, Any]:
+    staging = _recent_path_items(sync_dir / "staging", "*.csv", limit=8, recursive=True)
+    extracted = _recent_path_items(sync_dir / "extracted", "*.csv", limit=8, recursive=True)
+    manifests = _recent_path_items(sync_dir / "manifests", "*.json", limit=5)
+    worker_requests = _recent_path_items(worker_dir / "requests", "*.json", limit=8)
+    worker_downloads = _recent_path_items(worker_dir / "downloads", "*.zip", limit=12, recursive=True)
+    worker_manifests = _recent_path_items(worker_dir / "manifests", "*.json", limit=8)
+
+    latest_stage_dir = None
+    stage_dirs: list[Path] = []
+    try:
+        staging_dir = sync_dir / "staging"
+        if staging_dir.exists() and staging_dir.is_dir():
+            stage_dirs = [path for path in staging_dir.iterdir() if path.is_dir()]
+    except Exception:
+        stage_dirs = []
+    if stage_dirs:
+        latest = max(stage_dirs, key=lambda path: path.stat().st_mtime if path.exists() else 0)
+        latest_stage_dir = {
+            "name": latest.name,
+            "path": str(latest),
+            "modified_at": _path_modified_at(latest),
+        }
+
+    latest_activity_at = max(
+        [
+            value
+            for value in (
+                staging.get("latest_modified_at"),
+                extracted.get("latest_modified_at"),
+                manifests.get("latest_modified_at"),
+                worker_requests.get("latest_modified_at"),
+                worker_downloads.get("latest_modified_at"),
+                worker_manifests.get("latest_modified_at"),
+            )
+            if value
+        ],
+        default=None,
+    )
+    return {
+        "sync_dir": str(sync_dir),
+        "worker_dir": str(worker_dir),
+        "staging": staging,
+        "extracted": extracted,
+        "manifests": manifests,
+        "worker_requests": worker_requests,
+        "worker_downloads": worker_downloads,
+        "worker_manifests": worker_manifests,
+        "latest_stage_dir": latest_stage_dir,
+        "latest_activity_at": latest_activity_at,
+    }
+
+
+def _land_movement_sync_local_work(sync_dir: Path) -> dict[str, Any]:
+    raw = _recent_path_items(sync_dir / "raw", "*.zip", limit=8)
+    staging = _recent_path_items(sync_dir / "staging", "*.csv", limit=8, recursive=True)
+    extracted = _recent_path_items(sync_dir / "extracted", "*.csv", limit=8, recursive=True)
+    manifests = _recent_path_items(sync_dir / "manifests", "*.json", limit=5)
+
+    latest_stage_dir = None
+    stage_dirs: list[Path] = []
+    try:
+        staging_dir = sync_dir / "staging"
+        if staging_dir.exists() and staging_dir.is_dir():
+            stage_dirs = [path for path in staging_dir.iterdir() if path.is_dir()]
+    except Exception:
+        stage_dirs = []
+    if stage_dirs:
+        latest = max(stage_dirs, key=lambda path: path.stat().st_mtime if path.exists() else 0)
+        latest_stage_dir = {
+            "name": latest.name,
+            "path": str(latest),
+            "modified_at": _path_modified_at(latest),
+        }
+
+    latest_activity_at = max(
+        [
+            value
+            for value in (
+                raw.get("latest_modified_at"),
+                staging.get("latest_modified_at"),
+                extracted.get("latest_modified_at"),
+                manifests.get("latest_modified_at"),
+            )
+            if value
+        ],
+        default=None,
+    )
+    failed_log = sync_dir / "failed" / "failed.txt"
+    failed_tail: list[str] = []
+    try:
+        if failed_log.exists():
+            failed_tail = [line for line in failed_log.read_text(encoding="utf-8", errors="replace").splitlines() if line][-5:]
+    except Exception:
+        failed_tail = []
+
+    return {
+        "sync_dir": str(sync_dir),
+        "raw": raw,
+        "staging": staging,
+        "extracted": extracted,
+        "manifests": manifests,
+        "latest_stage_dir": latest_stage_dir,
+        "latest_activity_at": latest_activity_at,
+        "failed_tail": failed_tail,
+    }
+
+
+def _land_info_direct_worker_dir() -> Path:
+    return Path(os.getenv("LAND_INFO_DIRECT_WORKER_DIR", "/data/uploads/land_info_direct")).resolve()
+
+
+def _land_info_direct_worker_dirs() -> dict[str, Path]:
+    base = _land_info_direct_worker_dir()
+    dirs = {
+        "base": base,
+        "requests": base / "requests",
+        "uploads": base / "uploads",
+        "chunks": base / "uploads" / "chunks",
+        "accepted": base / "uploads" / "accepted",
+        "heartbeats": base / "heartbeats",
+        "manifests": base / "manifests",
+    }
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return dirs
+
+
+_DIRECT_LAND_INFO_PROCESSING_LOCK = Lock()
+_DIRECT_LAND_INFO_PROCESSING_REQUESTS: set[str] = set()
+
+
+def _safe_worker_file_name(value: str, default: str = "file") -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[\\/]+", "_", text)
+    text = re.sub(r"[^0-9A-Za-z_.가-힣-]+", "_", text)
+    text = text.strip("._ ")
+    return text[:180] or default
+
+
+def _direct_request_path(request_id: str) -> Path:
+    safe_id = _safe_worker_file_name(request_id, "request")
+    return _land_info_direct_worker_dirs()["requests"] / f"{safe_id}.json"
+
+
+def _direct_upload_meta_path(upload_id: str) -> Path:
+    safe_id = _safe_worker_file_name(upload_id, "upload")
+    return _land_info_direct_worker_dirs()["uploads"] / f"{safe_id}.json"
+
+
+def _write_direct_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _worker_now_iso() -> str:
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _require_land_info_worker(
+    x_worker_id: str | None = Header(default=None),
+    x_worker_token: str | None = Header(default=None),
+) -> str:
+    expected = str(os.getenv("LAND_INFO_WORKER_TOKEN", "") or "").strip()
+    worker_id = str(x_worker_id or "").strip()
+    token = str(x_worker_token or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="LAND_INFO_WORKER_TOKEN is not configured")
+    if not worker_id or token != expected:
+        raise HTTPException(status_code=403, detail="worker token is invalid")
+    return worker_id
+
+
+def _load_direct_request(request_id: str) -> dict[str, Any]:
+    data = _read_json_file(_direct_request_path(request_id)) or {}
+    if not data:
+        raise HTTPException(status_code=404, detail="worker request not found")
+    return data
+
+
+def _write_direct_request_data(request_id: str, data: dict[str, Any]) -> None:
+    _write_direct_json(_direct_request_path(request_id), data)
+
+
+def _direct_processor_script_path() -> str:
+    return os.getenv(
+        "LAND_INFO_DIRECT_PROCESSOR_SCRIPT",
+        "/scripts/process_land_info_direct_request.py",
+    )
+
+
+def _direct_processor_cleanup_on_success() -> bool:
+    return str(os.getenv("LAND_INFO_DIRECT_CLEANUP_ON_SUCCESS", "1")).strip().lower() in {
+        "1",
+        "true",
+        "t",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+async def _run_land_info_direct_processor(request_id: str) -> None:
+    logger = logging.getLogger("app.land_info_direct")
+    with _DIRECT_LAND_INFO_PROCESSING_LOCK:
+        if request_id in _DIRECT_LAND_INFO_PROCESSING_REQUESTS:
+            return
+        _DIRECT_LAND_INFO_PROCESSING_REQUESTS.add(request_id)
+
+    try:
+        script_path = _direct_processor_script_path()
+        cmd = [
+            "python",
+            script_path,
+            "--request-id",
+            request_id,
+            "--direct-dir",
+            str(_land_info_direct_worker_dir()),
+            "--import-timeout",
+            str(int(float(os.getenv("LAND_INFO_SYNC_IMPORT_TIMEOUT_SECONDS", "86400") or "86400"))),
+        ]
+        if _direct_processor_cleanup_on_success():
+            cmd.append("--cleanup-on-success")
+        else:
+            cmd.append("--no-cleanup-on-success")
+
+        data = _read_json_file(_direct_request_path(request_id)) or {}
+        data["status"] = "server_processing"
+        data["server_processor_command"] = [cmd[0], Path(script_path).name, *cmd[2:]]
+        data["server_processing_started_at"] = _worker_now_iso()
+        data["updated_at"] = _worker_now_iso()
+        _write_direct_request_data(request_id, data)
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        data = _read_json_file(_direct_request_path(request_id)) or data
+        data["server_processor_pid"] = process.pid
+        data["updated_at"] = _worker_now_iso()
+        _write_direct_request_data(request_id, data)
+
+        stdout, stderr = await process.communicate()
+        stdout_text = stdout.decode("utf-8", "replace")[-4000:] if stdout else ""
+        stderr_text = stderr.decode("utf-8", "replace")[-4000:] if stderr else ""
+        if stdout_text:
+            logger.info("land_info direct processor stdout request=%s\n%s", request_id, stdout_text)
+        if stderr_text:
+            logger.warning("land_info direct processor stderr request=%s\n%s", request_id, stderr_text)
+        if process.returncode != 0:
+            data = _read_json_file(_direct_request_path(request_id)) or {}
+            if str(data.get("status") or "").strip().lower() != "server_failed":
+                data["status"] = "server_failed"
+                data["server_failed_at"] = _worker_now_iso()
+            data["server_processor_returncode"] = int(process.returncode or 0)
+            data["server_processor_stdout_tail"] = stdout_text
+            data["server_processor_stderr_tail"] = stderr_text
+            data["updated_at"] = _worker_now_iso()
+            _write_direct_request_data(request_id, data)
+    except Exception as exc:
+        logger.exception("land_info direct processor failed before completion: request=%s", request_id)
+        data = _read_json_file(_direct_request_path(request_id)) or {}
+        data["status"] = "server_failed"
+        data["server_failed_at"] = _worker_now_iso()
+        data["server_error"] = str(exc)[:2000]
+        data["updated_at"] = _worker_now_iso()
+        _write_direct_request_data(request_id, data)
+    finally:
+        with _DIRECT_LAND_INFO_PROCESSING_LOCK:
+            _DIRECT_LAND_INFO_PROCESSING_REQUESTS.discard(request_id)
+
+
+def _start_land_info_direct_processor(request_id: str) -> bool:
+    with _DIRECT_LAND_INFO_PROCESSING_LOCK:
+        if request_id in _DIRECT_LAND_INFO_PROCESSING_REQUESTS:
+            return False
+    asyncio.create_task(_run_land_info_direct_processor(request_id))
+    return True
+
+
+def _direct_file_statuses(request_data: dict[str, Any]) -> dict[str, Any]:
+    statuses = request_data.get("file_statuses")
+    if not isinstance(statuses, dict):
+        statuses = {}
+        request_data["file_statuses"] = statuses
+    return statuses
+
+
+def _direct_catalog_items(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    items = catalog.get("items")
+    if not isinstance(items, list):
+        return []
+    cleaned: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        file_id = str(item.get("file_id") or "").strip()
+        dataset_code = str(item.get("dataset_code") or "").strip()
+        ds_file_id = str(item.get("ds_file_id") or "").strip()
+        file_no = str(item.get("file_no") or "").strip()
+        if not file_id or not dataset_code or not ds_file_id or not file_no:
+            continue
+        cleaned.append(dict(item))
+    return sorted(cleaned, key=lambda row: str(row.get("file_id") or ""))
+
+
+def _direct_catalog_item_is_incremental(item: dict[str, Any]) -> bool:
+    file_gbn = str(item.get("fileGbnCd") or item.get("file_gbn_cd") or "").strip().upper()
+    file_kind = str(item.get("file_kind") or item.get("fileKind") or "").strip().lower()
+    operation_mode = str(item.get("operation_mode") or item.get("operationMode") or "").strip().lower()
+    source_dataset_code = str(item.get("source_dataset_code") or item.get("sourceDatasetCode") or "").strip().upper()
+    file_id = str(item.get("file_id") or "").strip().upper()
+    incremental_raw = item.get("is_incremental")
+    is_incremental = (
+        incremental_raw is True
+        or str(incremental_raw or "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    )
+    return (
+        is_incremental
+        or file_gbn == "CH"
+        or file_kind in {"change", "changed", "incremental", "delta", "update"}
+        or operation_mode == "update"
+        or source_dataset_code.startswith("CH_")
+        or file_id.startswith("CH_")
+    )
+
+
+def _direct_catalog_signature(items: list[dict[str, Any]], supplied: Any = None) -> str:
+    supplied_text = str(supplied or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{32,64}", supplied_text):
+        return supplied_text
+    material = [
+        {
+            "file_id": item.get("file_id"),
+            "dataset_code": item.get("dataset_code"),
+            "region_code": item.get("region_code"),
+            "base_date": item.get("base_date"),
+            "updated_date": item.get("updated_date"),
+            "file_no": item.get("file_no"),
+            "ds_file_id": item.get("ds_file_id"),
+            "size_bytes": item.get("size_bytes"),
+        }
+        for item in items
+    ]
+    raw = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _direct_catalog_items_by_dataset_code(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        dataset_code = str(item.get("dataset_code") or "").strip().upper()
+        if dataset_code not in LAND_INFO_COMPONENTS:
+            continue
+        grouped.setdefault(dataset_code, []).append(item)
+    return {
+        code: sorted(rows, key=lambda row: str(row.get("file_id") or ""))
+        for code, rows in sorted(grouped.items())
+    }
+
+
+def _direct_catalog_dataset_signature(items: list[dict[str, Any]]) -> str:
+    return _direct_catalog_signature(items)
+
+
+def _direct_catalog_snapshot_key(items: list[dict[str, Any]], catalog: dict[str, Any]) -> str:
+    by_code: dict[str, set[str]] = {}
+    summaries = catalog.get("datasets")
+    if isinstance(summaries, list):
+        for row in summaries:
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("dataset_code") or "").strip()
+            if not code:
+                continue
+            dates = row.get("base_dates")
+            if isinstance(dates, list):
+                by_code.setdefault(code, set()).update(str(value).strip() for value in dates if str(value).strip())
+    for item in items:
+        code = str(item.get("dataset_code") or "").strip()
+        base_date = str(item.get("base_date") or "").strip()
+        if code and base_date:
+            by_code.setdefault(code, set()).add(base_date)
+    return "|".join(f"{code}={max(dates)}" for code, dates in sorted(by_code.items()) if dates)
+
+
+def _direct_catalog_dataset_snapshot_key(items: list[dict[str, Any]]) -> str:
+    dates = {
+        str(item.get("base_date") or "").strip()
+        for item in items
+        if str(item.get("base_date") or "").strip()
+    }
+    return max(dates) if dates else ""
+
+
+def _active_land_info_release_metadata() -> dict[str, Any] | None:
+    try:
+        with psycopg.connect(_db_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, version, records_count, metadata
+                    FROM cadastral_release
+                    WHERE data_type = 'land_info'
+                      AND is_active = TRUE
+                    ORDER BY activated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    metadata = row[3] if isinstance(row[3], dict) else {}
+    return {
+        "id": int(row[0]),
+        "version": row[1],
+        "records_count": int(row[2] or 0),
+        "metadata": metadata,
+    }
+
+
+def _direct_request_is_worker_runnable(request_data: dict[str, Any]) -> bool:
+    status = str(request_data.get("status") or "requested").strip().lower()
+    return status in {"pending", "requested", "claimed", "in_progress"}
+
+
+def _land_info_direct_worker_status() -> dict[str, Any]:
+    dirs = _land_info_direct_worker_dirs()
+    heartbeats: list[dict[str, Any]] = []
+    for path in sorted(dirs["heartbeats"].glob("*.json"), key=_path_mtime, reverse=True):
+        data = _read_json_file(path) or {}
+        heartbeats.append(
+            {
+                "worker_id": data.get("worker_id") or path.stem,
+                "hostname": data.get("hostname"),
+                "version": data.get("version"),
+                "status": data.get("status"),
+                "current_request_id": data.get("current_request_id"),
+                "current_file_id": data.get("current_file_id"),
+                "message": data.get("message"),
+                "download_dir": data.get("download_dir"),
+                "free_bytes": data.get("free_bytes"),
+                "received_at": data.get("received_at"),
+                "modified_at": _path_modified_at(path),
+            }
+        )
+
+    requests: list[dict[str, Any]] = []
+    for path in sorted(dirs["requests"].glob("*.json"), key=_path_mtime, reverse=True)[:20]:
+        data = _read_json_file(path) or {}
+        request_id = str(data.get("request_id") or path.stem)
+        file_statuses = data.get("file_statuses")
+        status_counts: dict[str, int] = {}
+        if isinstance(file_statuses, dict):
+            for value in file_statuses.values():
+                if not isinstance(value, dict):
+                    continue
+                status = str(value.get("status") or "unknown").strip().lower() or "unknown"
+                status_counts[status] = status_counts.get(status, 0) + 1
+        changed_dataset_codes = data.get("component_dataset_codes")
+        if not isinstance(changed_dataset_codes, list):
+            request_items = data.get("items") if isinstance(data.get("items"), list) else []
+            grouped_items = _direct_catalog_items_by_dataset_code(
+                [item for item in request_items if isinstance(item, dict)]
+            )
+            changed_dataset_codes = sorted(grouped_items)
+        component_data_types = data.get("component_data_types")
+        if not isinstance(component_data_types, list):
+            component_data_types = [
+                LAND_INFO_COMPONENTS[code]["data_type"]
+                for code in changed_dataset_codes
+                if code in LAND_INFO_COMPONENTS
+            ]
+        request_accepted_files: list[Path] = []
+        request_accepted_dir = dirs["accepted"] / _safe_worker_file_name(request_id, "request")
+        if request_accepted_dir.exists():
+            request_accepted_files = [
+                accepted_path
+                for accepted_path in request_accepted_dir.glob("*.zip")
+                if accepted_path.is_file()
+            ]
+        expected_count = None
+        try:
+            if data.get("expected_count") is not None:
+                expected_count = max(0, int(str(data.get("expected_count")).strip()))
+        except Exception:
+            expected_count = None
+        accepted_count = int(status_counts.get("accepted", 0) or len(request_accepted_files))
+        failed_count = int(status_counts.get("failed", 0) or data.get("failed_count") or 0)
+        completed_file_count = accepted_count + failed_count
+        progress_percent = None
+        if expected_count and expected_count > 0:
+            status_text = str(data.get("status") or "").strip().lower()
+            if status_text in {"server_processing", "server_processed", "processed"}:
+                progress_percent = 100.0
+            else:
+                progress_percent = max(0.0, min(100.0, completed_file_count / expected_count * 100.0))
+        requests.append(
+            {
+                "request_id": request_id,
+                "status": data.get("status") or "requested",
+                "expected_count": expected_count,
+                "uploaded_count": data.get("uploaded_count"),
+                "failed_count": data.get("failed_count"),
+                "source_signature": data.get("source_signature"),
+                "changed_source_signature": data.get("changed_source_signature"),
+                "snapshot_key": data.get("snapshot_key"),
+                "changed_dataset_codes": changed_dataset_codes,
+                "component_data_types": component_data_types,
+                "claimed_by": data.get("claimed_by"),
+                "created_at": data.get("created_at"),
+                "updated_at": data.get("updated_at"),
+                "worker_completed_at": data.get("worker_completed_at"),
+                "file_status_counts": status_counts,
+                "accepted_upload_count": len(request_accepted_files),
+                "accepted_upload_bytes": sum(_path_file_size(accepted_path) for accepted_path in request_accepted_files),
+                "completed_file_count": completed_file_count,
+                "progress_percent": progress_percent,
+                "path": str(path),
+            }
+        )
+
+    accepted_files: list[Path] = []
+    if dirs["accepted"].exists():
+        accepted_files = [path for path in dirs["accepted"].rglob("*.zip") if path.is_file()]
+    return {
+        "base_dir": str(dirs["base"]),
+        "latest_heartbeat": heartbeats[0] if heartbeats else None,
+        "heartbeats": heartbeats[:10],
+        "request_count": len(list(dirs["requests"].glob("*.json"))),
+        "recent_requests": requests,
+        "accepted_upload_count": len(accepted_files),
+        "accepted_upload_bytes": sum(_path_file_size(path) for path in accepted_files),
+        "accepted_dir": str(dirs["accepted"]),
+    }
+
+
+@app.post("/v1/worker/land-info/updates/ensure")
+def worker_land_info_ensure_update(
+    body: Dict[str, Any],
+    x_worker_id: str | None = Header(default=None),
+    x_worker_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    worker_id = _require_land_info_worker(x_worker_id, x_worker_token)
+    payload = dict(body or {})
+    catalog = payload.get("source_catalog")
+    if not isinstance(catalog, dict):
+        raise HTTPException(status_code=400, detail="source_catalog is required")
+    items = _direct_catalog_items(catalog)
+    if not items:
+        raise HTTPException(status_code=400, detail="source_catalog.items has no downloadable files")
+
+    items_by_code = _direct_catalog_items_by_dataset_code(items)
+    if not items_by_code:
+        raise HTTPException(status_code=400, detail="source_catalog.items has no supported land_info dataset codes")
+    incremental_items = [item for item in items if _direct_catalog_item_is_incremental(item)]
+    if incremental_items:
+        incremental_codes = sorted(
+            {
+                str(item.get("dataset_code") or "").strip().upper()
+                for item in incremental_items
+                if str(item.get("dataset_code") or "").strip()
+            }
+        )
+        return ok(
+            {
+                "created": False,
+                "request_created": False,
+                "request_id": None,
+                "reason": "incremental_not_enabled",
+                "message": "land_info direct incremental import is not enabled yet; send full AL files or wait for server-side AL_D157 delta support.",
+                "incremental_supported_dataset_codes": ["AL_D157"],
+                "incremental_dataset_codes": incremental_codes,
+                "incremental_expected_count": len(incremental_items),
+                "incremental_samples": [
+                    {
+                        "file_id": item.get("file_id"),
+                        "dataset_code": item.get("dataset_code"),
+                        "source_dataset_code": item.get("source_dataset_code") or item.get("sourceDatasetCode"),
+                        "fileGbnCd": item.get("fileGbnCd") or item.get("file_gbn_cd"),
+                        "operation_mode": item.get("operation_mode") or item.get("operationMode"),
+                    }
+                    for item in incremental_items[:5]
+                ],
+            }
+        )
+
+    source_signature = _direct_catalog_signature(items, catalog.get("signature"))
+    snapshot_key = _direct_catalog_snapshot_key(items, catalog)
+    active = _active_land_info_release_metadata()
+    active_components = _active_land_info_component_releases(force_refresh=True)
+    changed_items: list[dict[str, Any]] = []
+    component_status: dict[str, dict[str, Any]] = {}
+    for dataset_code, dataset_items in items_by_code.items():
+        component_signature = _direct_catalog_dataset_signature(dataset_items)
+        component_snapshot = _direct_catalog_dataset_snapshot_key(dataset_items)
+        active_component = active_components.get(dataset_code)
+        active_metadata = (
+            active_component.get("metadata")
+            if isinstance(active_component, dict) and isinstance(active_component.get("metadata"), dict)
+            else {}
+        )
+        active_signatures = {
+            str(active_metadata.get("land_info_source_signature") or "").strip().lower(),
+            str(active_metadata.get("source_signature") or "").strip().lower(),
+            str(active_metadata.get("vworld_source_signature") or "").strip().lower(),
+        }
+        active_snapshots = {
+            str(active_metadata.get("land_info_snapshot_key") or "").strip(),
+            str(active_metadata.get("snapshot_key") or "").strip(),
+            str(active_metadata.get("land_info_base_date") or "").strip(),
+            str(active_metadata.get("base_date") or "").strip(),
+        }
+        up_to_date = bool(
+            active_component
+            and (
+                component_signature in active_signatures
+                or (component_snapshot and component_snapshot in active_snapshots)
+            )
+        )
+        if not up_to_date:
+            changed_items.extend(dataset_items)
+        component_status[dataset_code] = {
+            "data_type": LAND_INFO_COMPONENTS[dataset_code]["data_type"],
+            "dataset_name": LAND_INFO_COMPONENTS[dataset_code]["name"],
+            "source_signature": component_signature,
+            "snapshot_key": component_snapshot,
+            "active_release": active_component,
+            "up_to_date": up_to_date,
+            "expected_count": len(dataset_items),
+        }
+
+    if not changed_items:
+        return ok(
+            {
+                "created": False,
+                "request_created": False,
+                "request_id": None,
+                "reason": "already_active",
+                "active_release": active,
+                "component_status": component_status,
+                "source_signature": source_signature,
+                "snapshot_key": snapshot_key,
+            }
+        )
+
+    changed_signature = _direct_catalog_signature(changed_items)
+    request_id = f"land_info_update_{changed_signature[:16]}"
+    if bool(payload.get("dry_run")):
+        return ok(
+            {
+                "created": False,
+                "request_created": False,
+                "request_id": request_id,
+                "reason": "dry_run",
+                "expected_count": len(changed_items),
+                "changed_dataset_codes": sorted(_direct_catalog_items_by_dataset_code(changed_items)),
+                "component_status": component_status,
+                "source_signature": source_signature,
+                "snapshot_key": snapshot_key,
+            }
+        )
+
+    request_path = _direct_request_path(request_id)
+    existing = _read_json_file(request_path)
+    if isinstance(existing, dict) and existing:
+        status = str(existing.get("status") or "requested").strip().lower()
+        if _direct_request_is_worker_runnable(existing):
+            return ok(
+                {
+                    "created": False,
+                    "request_created": False,
+                    "request_id": request_id,
+                    "reason": f"existing_{status}",
+                    "request": existing,
+                    "source_signature": source_signature,
+                    "snapshot_key": snapshot_key,
+                }
+            )
+        return ok(
+            {
+                "created": False,
+                "request_created": False,
+                "request_id": request_id,
+                "reason": f"existing_{status}",
+                "source_signature": source_signature,
+                "snapshot_key": snapshot_key,
+            }
+        )
+
+    now = _worker_now_iso()
+    dirs = _land_info_direct_worker_dirs()
+    request_data = {
+        "request_id": request_id,
+        "created_at": now,
+        "updated_at": now,
+        "status": "requested",
+        "data_type": "land_info",
+        "operation_mode": str(catalog.get("operation_mode") or "full"),
+        "source": str(catalog.get("source") or "vworld"),
+        "source_signature": source_signature,
+        "changed_source_signature": changed_signature,
+        "snapshot_key": snapshot_key,
+        "activate": bool(payload.get("activate", True)),
+        "test_mode": bool(payload.get("test_mode", False)),
+        "expected_count": len(changed_items),
+        "items": changed_items,
+        "component_dataset_codes": sorted(_direct_catalog_items_by_dataset_code(changed_items)),
+        "component_data_types": [
+            LAND_INFO_COMPONENTS[code]["data_type"]
+            for code in sorted(_direct_catalog_items_by_dataset_code(changed_items))
+        ],
+        "component_status": component_status,
+        "created_by_worker": worker_id,
+        "worker_hostname": payload.get("hostname"),
+        "worker_version": payload.get("version"),
+        "source_catalog": {
+            "source": catalog.get("source"),
+            "data_type": catalog.get("data_type"),
+            "operation_mode": catalog.get("operation_mode"),
+            "discovered_at": catalog.get("discovered_at"),
+            "expected_count": catalog.get("expected_count"),
+            "signature": source_signature,
+            "snapshot_key": snapshot_key,
+            "changed_signature": changed_signature,
+            "datasets": catalog.get("datasets"),
+        },
+    }
+    _write_direct_json(request_path, request_data)
+    _write_direct_json(dirs["manifests"] / f"{_safe_worker_file_name(request_id, 'request')}.source_catalog.json", catalog)
+    return ok(
+        {
+            "created": True,
+            "request_created": True,
+            "request_id": request_id,
+            "reason": "new_source_catalog",
+            "request": request_data,
+            "changed_dataset_codes": request_data["component_dataset_codes"],
+            "component_status": component_status,
+            "source_signature": source_signature,
+            "snapshot_key": snapshot_key,
+        }
+    )
+
+
+@app.post("/v1/worker/land-info/heartbeat")
+async def worker_land_info_heartbeat(
+    body: Dict[str, Any],
+    x_worker_id: str | None = Header(default=None),
+    x_worker_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    worker_id = _require_land_info_worker(x_worker_id, x_worker_token)
+    dirs = _land_info_direct_worker_dirs()
+    payload = dict(body or {})
+    payload["worker_id"] = worker_id
+    payload["received_at"] = _worker_now_iso()
+    _write_direct_json(dirs["heartbeats"] / f"{_safe_worker_file_name(worker_id, 'worker')}.json", payload)
+    return ok({"server_time": _worker_now_iso()})
+
+
+@app.get("/v1/worker/land-info/requests/next")
+def worker_land_info_next_request(
+    worker_id: str = Query(default=""),
+    x_worker_id: str | None = Header(default=None),
+    x_worker_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    header_worker_id = _require_land_info_worker(x_worker_id, x_worker_token)
+    resolved_worker_id = str(worker_id or header_worker_id).strip()
+    dirs = _land_info_direct_worker_dirs()
+    candidates: list[dict[str, Any]] = []
+    for path in sorted(dirs["requests"].glob("*.json"), key=lambda item: item.stat().st_mtime):
+        data = _read_json_file(path) or {}
+        if not isinstance(data, dict):
+            continue
+        status = str(data.get("status") or "pending").strip().lower()
+        claimed_by = str(data.get("claimed_by") or "").strip()
+        if status in {"pending", "requested"} or (
+            status in {"claimed", "in_progress"} and claimed_by == resolved_worker_id
+        ):
+            candidates.append(data)
+    if not candidates:
+        return ok(None)
+    return ok(candidates[0])
+
+
+@app.post("/v1/worker/land-info/requests/{request_id}/claim")
+def worker_land_info_claim_request(
+    request_id: str,
+    body: Dict[str, Any],
+    x_worker_id: str | None = Header(default=None),
+    x_worker_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    worker_id = _require_land_info_worker(x_worker_id, x_worker_token)
+    requested_worker_id = str((body or {}).get("worker_id") or worker_id).strip()
+    data = _load_direct_request(request_id)
+    claimed_by = str(data.get("claimed_by") or "").strip()
+    status = str(data.get("status") or "pending").strip().lower()
+    if claimed_by and claimed_by != requested_worker_id and status not in {"pending", "requested"}:
+        return {"ok": False, "error": "already_claimed"}
+    data["status"] = "claimed"
+    data["claimed_by"] = requested_worker_id
+    data["claimed_at"] = data.get("claimed_at") or _worker_now_iso()
+    data["updated_at"] = _worker_now_iso()
+    _write_direct_json(_direct_request_path(request_id), data)
+    return ok({"claimed": True, "request_id": request_id})
+
+
+@app.post("/v1/worker/land-info/requests/{request_id}/files/{file_id}/status")
+def worker_land_info_file_status(
+    request_id: str,
+    file_id: str,
+    body: Dict[str, Any],
+    x_worker_id: str | None = Header(default=None),
+    x_worker_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    worker_id = _require_land_info_worker(x_worker_id, x_worker_token)
+    data = _load_direct_request(request_id)
+    statuses = _direct_file_statuses(data)
+    payload = dict(body or {})
+    payload["worker_id"] = worker_id
+    payload["file_id"] = file_id
+    payload["updated_at"] = _worker_now_iso()
+    statuses[file_id] = payload
+    data["updated_at"] = _worker_now_iso()
+    _write_direct_json(_direct_request_path(request_id), data)
+    return ok({"request_id": request_id, "file_id": file_id, "status": payload.get("status")})
+
+
+@app.post("/v1/worker/land-info/uploads/init")
+def worker_land_info_upload_init(
+    body: Dict[str, Any],
+    x_worker_id: str | None = Header(default=None),
+    x_worker_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    worker_id = _require_land_info_worker(x_worker_id, x_worker_token)
+    request_id = str((body or {}).get("request_id") or "").strip()
+    file_id = str((body or {}).get("file_id") or "").strip()
+    file_name = _safe_worker_file_name(str((body or {}).get("file_name") or f"{file_id}.zip"), "upload.zip")
+    sha256 = str((body or {}).get("sha256") or "").strip().lower()
+    try:
+        file_size = int((body or {}).get("file_size") or 0)
+        chunk_size = int((body or {}).get("chunk_size") or 0)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid file_size or chunk_size")
+    if not request_id or not file_id or file_size <= 0 or not sha256:
+        raise HTTPException(status_code=400, detail="request_id, file_id, file_size and sha256 are required")
+
+    upload_id = hashlib.sha256(f"{request_id}\n{file_id}\n{file_name}\n{sha256}".encode("utf-8")).hexdigest()[:32]
+    dirs = _land_info_direct_worker_dirs()
+    meta_path = _direct_upload_meta_path(upload_id)
+    meta = _read_json_file(meta_path) or {}
+    chunks_dir = dirs["chunks"] / upload_id
+    accepted_path = dirs["accepted"] / _safe_worker_file_name(request_id, "request") / file_name
+    received_chunks: list[int] = []
+    if chunks_dir.exists():
+        for chunk_path in chunks_dir.glob("*.chunk"):
+            with contextlib.suppress(Exception):
+                received_chunks.append(int(chunk_path.stem))
+    if accepted_path.exists() and accepted_path.stat().st_size == file_size:
+        meta_status = str(meta.get("status") or "")
+        if meta_status in {"accepted", "processed", "uploaded"}:
+            return ok(
+                {
+                    "upload_id": upload_id,
+                    "status": meta_status,
+                    "already_uploaded": True,
+                    "received_chunks": sorted(received_chunks),
+                    "received_bytes": int(accepted_path.stat().st_size),
+                }
+            )
+
+    meta.update(
+        {
+            "upload_id": upload_id,
+            "request_id": request_id,
+            "file_id": file_id,
+            "file_name": file_name,
+            "file_size": file_size,
+            "sha256": sha256,
+            "chunk_size": chunk_size,
+            "worker_id": worker_id,
+            "status": "uploading",
+            "updated_at": _worker_now_iso(),
+            "created_at": meta.get("created_at") or _worker_now_iso(),
+        }
+    )
+    _write_direct_json(meta_path, meta)
+    return ok(
+        {
+            "upload_id": upload_id,
+            "received_chunks": sorted(received_chunks),
+            "received_bytes": sum(path.stat().st_size for path in chunks_dir.glob("*.chunk")) if chunks_dir.exists() else 0,
+            "status": "uploading",
+        }
+    )
+
+
+@app.put("/v1/worker/land-info/uploads/{upload_id}/chunks/{chunk_index}")
+async def worker_land_info_upload_chunk(
+    upload_id: str,
+    chunk_index: int,
+    request: Request,
+    x_chunk_offset: str | None = Header(default=None),
+    x_chunk_size: str | None = Header(default=None),
+    x_worker_id: str | None = Header(default=None),
+    x_worker_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    _require_land_info_worker(x_worker_id, x_worker_token)
+    if chunk_index < 0:
+        raise HTTPException(status_code=400, detail="chunk_index must be non-negative")
+    meta = _read_json_file(_direct_upload_meta_path(upload_id)) or {}
+    if not meta:
+        raise HTTPException(status_code=404, detail="upload not found")
+    raw = await request.body()
+    expected_size = int(x_chunk_size or len(raw) or 0)
+    if expected_size != len(raw):
+        raise HTTPException(status_code=400, detail="chunk size mismatch")
+    dirs = _land_info_direct_worker_dirs()
+    chunks_dir = dirs["chunks"] / _safe_worker_file_name(upload_id, "upload")
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    chunk_path = chunks_dir / f"{int(chunk_index):08d}.chunk"
+    chunk_path.write_bytes(raw)
+    meta["status"] = "uploading"
+    meta["updated_at"] = _worker_now_iso()
+    meta["last_chunk_index"] = int(chunk_index)
+    if x_chunk_offset is not None:
+        meta["last_chunk_offset"] = x_chunk_offset
+    _write_direct_json(_direct_upload_meta_path(upload_id), meta)
+    received_bytes = sum(path.stat().st_size for path in chunks_dir.glob("*.chunk"))
+    return ok({"upload_id": upload_id, "chunk_index": int(chunk_index), "received_bytes": received_bytes})
+
+
+@app.post("/v1/worker/land-info/uploads/{upload_id}/complete")
+def worker_land_info_upload_complete(
+    upload_id: str,
+    body: Dict[str, Any],
+    x_worker_id: str | None = Header(default=None),
+    x_worker_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    _require_land_info_worker(x_worker_id, x_worker_token)
+    meta_path = _direct_upload_meta_path(upload_id)
+    meta = _read_json_file(meta_path) or {}
+    if not meta:
+        raise HTTPException(status_code=404, detail="upload not found")
+    expected_sha = str((body or {}).get("sha256") or meta.get("sha256") or "").strip().lower()
+    expected_size = int((body or {}).get("file_size") or meta.get("file_size") or 0)
+    dirs = _land_info_direct_worker_dirs()
+    chunks_dir = dirs["chunks"] / _safe_worker_file_name(upload_id, "upload")
+    if not chunks_dir.exists():
+        raise HTTPException(status_code=400, detail="upload chunks not found")
+    accepted_dir = dirs["accepted"] / _safe_worker_file_name(str(meta.get("request_id") or "request"), "request")
+    accepted_dir.mkdir(parents=True, exist_ok=True)
+    file_name = _safe_worker_file_name(str(meta.get("file_name") or f"{upload_id}.zip"), "upload.zip")
+    target = accepted_dir / file_name
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    digest = hashlib.sha256()
+    total = 0
+    with tmp.open("wb") as out:
+        for chunk_path in sorted(chunks_dir.glob("*.chunk")):
+            raw = chunk_path.read_bytes()
+            out.write(raw)
+            digest.update(raw)
+            total += len(raw)
+    actual_sha = digest.hexdigest()
+    if expected_size and total != expected_size:
+        with contextlib.suppress(Exception):
+            tmp.unlink()
+        raise HTTPException(status_code=400, detail=f"uploaded file size mismatch: expected={expected_size} actual={total}")
+    if expected_sha and actual_sha != expected_sha:
+        with contextlib.suppress(Exception):
+            tmp.unlink()
+        raise HTTPException(status_code=400, detail="uploaded sha256 mismatch")
+    zip_verified = zipfile.is_zipfile(tmp)
+    if zip_verified:
+        with zipfile.ZipFile(tmp) as archive:
+            zip_verified = archive.testzip() is None
+    if not zip_verified:
+        with contextlib.suppress(Exception):
+            tmp.unlink()
+        raise HTTPException(status_code=400, detail="uploaded zip verification failed")
+    tmp.replace(target)
+    with contextlib.suppress(Exception):
+        shutil.rmtree(chunks_dir)
+    meta.update(
+        {
+            "status": "accepted",
+            "server_path": str(target),
+            "sha256_verified": True,
+            "zip_verified": True,
+            "accepted_at": _worker_now_iso(),
+            "updated_at": _worker_now_iso(),
+        }
+    )
+    _write_direct_json(meta_path, meta)
+    return ok(
+        {
+            "upload_id": upload_id,
+            "status": "accepted",
+            "server_path": str(target),
+            "sha256_verified": True,
+            "zip_verified": True,
+        }
+    )
+
+
+@app.post("/v1/worker/land-info/requests/{request_id}/complete")
+async def worker_land_info_request_complete(
+    request_id: str,
+    body: Dict[str, Any],
+    x_worker_id: str | None = Header(default=None),
+    x_worker_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    worker_id = _require_land_info_worker(x_worker_id, x_worker_token)
+    data = _load_direct_request(request_id)
+    uploaded_count = int((body or {}).get("uploaded_count") or 0)
+    failed_count = int((body or {}).get("failed_count") or 0)
+    data["status"] = "server_processing" if failed_count == 0 else "completed_with_failures"
+    data["worker_id"] = worker_id
+    data["uploaded_count"] = uploaded_count
+    data["failed_count"] = failed_count
+    data["worker_completed_at"] = _worker_now_iso()
+    data["updated_at"] = _worker_now_iso()
+    _write_direct_json(_direct_request_path(request_id), data)
+    processor_started = False
+    if failed_count == 0:
+        processor_started = _start_land_info_direct_processor(request_id)
+    return ok(
+        {
+            "request_id": request_id,
+            "status": data["status"],
+            "processor_started": processor_started,
+        }
+    )
+
+
+def _parse_datetime(value: Any) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
+        return parsed
+    except Exception:
+        return None
+
+
+def _add_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    zero_based = (year * 12 + (month - 1)) + delta
+    return zero_based // 12, zero_based % 12 + 1
+
+
+def _building_hub_release_data_month(release: dict[str, Any] | None) -> str | None:
+    if not release:
+        return None
+    candidates: list[str] = []
+    for key in ("version", "source_name"):
+        value = release.get(key)
+        if value:
+            candidates.append(str(value))
+    metadata = release.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("version", "source_name", "latest_month", "data_month"):
+            value = metadata.get(key)
+            if value:
+                candidates.append(str(value))
+
+    patterns = (
+        re.compile(r"hub-(\d{4})(\d{2})"),
+        re.compile(r"(\d{4})-(\d{1,2})"),
+        re.compile(r"(\d{4})년\s*(\d{1,2})월"),
+    )
+    for text in candidates:
+        for pattern in patterns:
+            match = pattern.search(text)
+            if not match:
+                continue
+            year = int(match.group(1))
+            month = int(match.group(2))
+            if 1 <= month <= 12:
+                return f"{year:04d}-{month:02d}"
+    return None
+
+
+def _building_hub_expected_upload_at(data_month: str | None) -> str | None:
+    if not data_month:
+        return None
+    match = re.fullmatch(r"(\d{4})-(\d{2})", data_month)
+    if not match:
+        return None
+    upload_day = max(1, min(28, int(os.getenv("BUILDING_HUB_SYNC_UPLOAD_DAY", "20") or "20")))
+    upload_hour = max(0, min(23, int(os.getenv("BUILDING_HUB_SYNC_UPLOAD_CHECK_HOUR", "13") or "13")))
+    upload_year, upload_month = _add_months(int(match.group(1)), int(match.group(2)), 2)
+    local_tz = dt.datetime.now().astimezone().tzinfo
+    upload_at = dt.datetime(upload_year, upload_month, upload_day, upload_hour, 0, 0, tzinfo=local_tz)
+    return upload_at.isoformat(timespec="seconds")
+
+
+def _building_hub_scheduler_state(
+    *,
+    next_expected_upload_at: str | None,
+    latest_run: dict[str, Any] | None,
+    latest_job: dict[str, Any] | None,
+) -> dict[str, Any]:
+    now = dt.datetime.now().astimezone()
+    window_days = float(os.getenv("BUILDING_HUB_SYNC_UPLOAD_WINDOW_DAYS", "7") or "7")
+    window_interval = int(float(os.getenv("BUILDING_HUB_SYNC_WINDOW_INTERVAL_SECONDS", "86400") or "86400"))
+    late_interval = int(float(os.getenv("BUILDING_HUB_SYNC_LATE_INTERVAL_SECONDS", "86400") or "86400"))
+    status = "WAITING"
+    reason = "다음 예상 업로드일 전"
+    next_check_at = next_expected_upload_at
+
+    job_status = str((latest_job or {}).get("status") or "").upper()
+    if job_status in {"QUEUED", "RUNNING"}:
+        return {
+            "status": "IMPORTING",
+            "reason": f"import job {latest_job.get('id')} {job_status}",
+            "next_check_at": None,
+            "window_interval_seconds": window_interval,
+            "late_interval_seconds": late_interval,
+        }
+
+    latest_run_status = str((latest_run or {}).get("status") or "")
+    if latest_run_status == "failed":
+        status = "ERROR"
+        reason = str((latest_run or {}).get("error") or "최근 자동화 실행 실패")
+
+    expected_dt = None
+    if next_expected_upload_at:
+        expected_dt = dt.datetime.fromisoformat(next_expected_upload_at)
+    if expected_dt is not None and status != "ERROR":
+        if now < expected_dt:
+            status = "WAITING"
+            reason = "다음 예상 업로드일 전"
+            next_check_at = next_expected_upload_at
+        else:
+            upload_window_end = expected_dt + dt.timedelta(days=max(1.0, window_days))
+            if now <= upload_window_end:
+                status = "CHECKING_DAILY"
+                reason = "예상 업로드 기간"
+                next_check_at = (now + dt.timedelta(seconds=window_interval)).isoformat(timespec="seconds")
+            else:
+                status = "CHECKING_LATE"
+                reason = "예상 기간 이후 미게시 확인"
+                next_check_at = (now + dt.timedelta(seconds=late_interval)).isoformat(timespec="seconds")
+
+    return {
+        "status": status,
+        "reason": reason,
+        "next_check_at": next_check_at,
+        "window_interval_seconds": window_interval,
+        "late_interval_seconds": late_interval,
+    }
+
+
+@app.get("/v1/admin/building-hub-sync/status")
+def get_building_hub_sync_status(
+    x_admin_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    sync_dir = _building_hub_sync_dir()
+    cycle_manifest = _read_json_file(sync_dir / "cycle_manifest.json") or {}
+    fetch_manifest = _read_json_file(sync_dir / "manifest.json") or {}
+    latest_run = cycle_manifest.get("latest") if isinstance(cycle_manifest.get("latest"), dict) else None
+    latest_fetch = fetch_manifest.get("latest") if isinstance(fetch_manifest.get("latest"), dict) else None
+
+    active_release = None
+    latest_job = None
+    try:
+        with psycopg.connect(_db_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      id, version, data_type, source_name, status, is_active, records_count,
+                      metadata, created_at, updated_at, activated_at
+                    FROM cadastral_release
+                    WHERE data_type = 'building_info'
+                      AND is_active = TRUE
+                    ORDER BY activated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    active_release = _release_row_to_dict(row)
+
+                cur.execute(
+                    """
+                    SELECT
+                      j.id, j.release_id, r.version, j.status, j.source_path,
+                      j.total_files, j.processed_files, j.inserted_rows, j.error_message,
+                      j.created_at, j.started_at, j.finished_at, j.updated_at,
+                      COALESCE(j.data_type, r.data_type, 'building_info') AS data_type
+                    FROM cadastral_import_job j
+                    LEFT JOIN cadastral_release r ON r.id = j.release_id
+                    WHERE COALESCE(j.data_type, r.data_type, 'building_info') = 'building_info'
+                    ORDER BY j.id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    latest_job = _import_job_row_to_dict(row)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to load building hub sync status: {exc}")
+
+    data_month = _building_hub_release_data_month(active_release)
+    next_expected_upload_at = _building_hub_expected_upload_at(data_month)
+    scheduler = _building_hub_scheduler_state(
+        next_expected_upload_at=next_expected_upload_at,
+        latest_run=latest_run,
+        latest_job=latest_job,
+    )
+
+    return ok(
+        {
+            "sync_dir": str(sync_dir),
+            "manifest_exists": bool(cycle_manifest),
+            "source_manifest_exists": bool(fetch_manifest),
+            "active_release": active_release,
+            "active_data_month": data_month,
+            "next_expected_upload_at": next_expected_upload_at,
+            "scheduler": scheduler,
+            "latest_run": latest_run,
+            "latest_fetch": latest_fetch,
+            "latest_job": latest_job,
+            "config": {
+                "upload_day": int(os.getenv("BUILDING_HUB_SYNC_UPLOAD_DAY", "20") or "20"),
+                "upload_check_hour": int(os.getenv("BUILDING_HUB_SYNC_UPLOAD_CHECK_HOUR", "13") or "13"),
+                "upload_window_days": float(os.getenv("BUILDING_HUB_SYNC_UPLOAD_WINDOW_DAYS", "7") or "7"),
+                "window_interval_seconds": int(float(os.getenv("BUILDING_HUB_SYNC_WINDOW_INTERVAL_SECONDS", "86400") or "86400")),
+                "late_interval_seconds": int(float(os.getenv("BUILDING_HUB_SYNC_LATE_INTERVAL_SECONDS", "86400") or "86400")),
+            },
+        }
+    )
+
+
+def _incremental_sync_scheduler_state(
+    *,
+    env_prefix: str,
+    latest_run: dict[str, Any] | None,
+    latest_job: dict[str, Any] | None,
+    local_work: dict[str, Any],
+) -> dict[str, Any]:
+    check_interval = int(float(os.getenv(f"{env_prefix}_CHECK_INTERVAL_SECONDS", "86400") or "86400"))
+    retry_interval = int(float(os.getenv(f"{env_prefix}_RETRY_SECONDS", "3600") or "3600"))
+    status = "WAITING"
+    reason = "다음 확인 대기"
+    next_check_at = None
+
+    job_status = str((latest_job or {}).get("status") or "").upper()
+    if job_status in {"QUEUED", "RUNNING"}:
+        return {
+            "status": "IMPORTING",
+            "reason": f"import job {latest_job.get('id')} {job_status}",
+            "next_check_at": None,
+            "check_interval_seconds": check_interval,
+            "retry_interval_seconds": retry_interval,
+        }
+
+    latest_run_status = str((latest_run or {}).get("status") or "")
+    if latest_run_status == "failed":
+        status = "ERROR"
+        reason = str((latest_run or {}).get("error") or "최근 자동화 실행 실패")
+        finished = _parse_datetime((latest_run or {}).get("finished_at"))
+        if finished:
+            next_check_at = (finished + dt.timedelta(seconds=retry_interval)).isoformat(timespec="seconds")
+    else:
+        finished = _parse_datetime((latest_run or {}).get("finished_at"))
+        activity = _parse_datetime(local_work.get("latest_activity_at"))
+        if activity and (not finished or activity > finished):
+            status = "PREPARING"
+            reason = "증분 다운로드/변환 진행 중"
+        elif latest_run_status in {"imported", "noop", "check_only"}:
+            status = "SLEEPING"
+            reason = "최근 사이클 완료"
+            if finished:
+                next_check_at = (finished + dt.timedelta(seconds=check_interval)).isoformat(timespec="seconds")
+        elif latest_run_status:
+            status = str(latest_run_status).upper()
+            reason = "최근 manifest 기준"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "next_check_at": next_check_at,
+        "check_interval_seconds": check_interval,
+        "retry_interval_seconds": retry_interval,
+    }
+
+
+def _cadastral_scheduler_state(
+    *,
+    latest_run: dict[str, Any] | None,
+    latest_job: dict[str, Any] | None,
+    local_work: dict[str, Any],
+) -> dict[str, Any]:
+    return _incremental_sync_scheduler_state(
+        env_prefix="CADASTRAL_SYNC",
+        latest_run=latest_run,
+        latest_job=latest_job,
+        local_work=local_work,
+    )
+
+
+@app.get("/v1/admin/cadastral-sync/status")
+def get_cadastral_sync_status(
+    x_admin_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    sync_dir = _cadastral_sync_dir()
+    cycle_manifest = _read_json_file(sync_dir / "cycle_manifest.json") or {}
+    latest_run = cycle_manifest.get("latest") if isinstance(cycle_manifest.get("latest"), dict) else None
+    local_work = _cadastral_sync_local_work(sync_dir)
+
+    active_release = None
+    latest_job = None
+    recent_update_files: list[dict[str, Any]] = []
+    update_file_count = 0
+    try:
+        with psycopg.connect(_db_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      id, version, data_type, source_name, status, is_active, records_count,
+                      metadata, created_at, updated_at, activated_at
+                    FROM cadastral_release
+                    WHERE data_type = 'cadastral'
+                      AND is_active = TRUE
+                    ORDER BY activated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    active_release = _release_row_to_dict(row)
+
+                cur.execute(
+                    """
+                    SELECT
+                      j.id, j.release_id, r.version, j.status, j.source_path,
+                      j.total_files, j.processed_files, j.inserted_rows, j.error_message,
+                      j.created_at, j.started_at, j.finished_at, j.updated_at,
+                      COALESCE(j.data_type, r.data_type, 'cadastral') AS data_type
+                    FROM cadastral_import_job j
+                    LEFT JOIN cadastral_release r ON r.id = j.release_id
+                    WHERE COALESCE(j.data_type, r.data_type, 'cadastral') = 'cadastral'
+                    ORDER BY j.id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    latest_job = _import_job_row_to_dict(row)
+
+                update_rows = _load_recent_update_file_rows(conn, data_type="cadastral", limit=8, offset=0)
+                recent_update_files = [_update_file_row_to_dict(item) for item in update_rows]
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM dataset_import_file f
+                    LEFT JOIN cadastral_release r ON r.id = f.release_id
+                    WHERE COALESCE(f.data_type, r.data_type, 'cadastral') = 'cadastral'
+                      AND COALESCE(r.metadata ->> 'operation_mode', '') = 'update'
+                    """
+                )
+                count_row = cur.fetchone()
+                update_file_count = int(count_row[0] or 0) if count_row else 0
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to load cadastral sync status: {exc}")
+
+    scheduler = _cadastral_scheduler_state(
+        latest_run=latest_run,
+        latest_job=latest_job,
+        local_work=local_work,
+    )
+
+    return ok(
+        {
+            "sync_dir": str(sync_dir),
+            "manifest_exists": bool(cycle_manifest),
+            "active_release": active_release,
+            "scheduler": scheduler,
+            "latest_run": latest_run,
+            "latest_job": latest_job,
+            "recent_update_files": recent_update_files,
+            "update_file_count": update_file_count,
+            "local_work": local_work,
+            "config": {
+                "check_interval_seconds": int(float(os.getenv("CADASTRAL_SYNC_CHECK_INTERVAL_SECONDS", "86400") or "86400")),
+                "retry_interval_seconds": int(float(os.getenv("CADASTRAL_SYNC_RETRY_SECONDS", "3600") or "3600")),
+                "initial_delay_seconds": int(float(os.getenv("CADASTRAL_SYNC_INITIAL_DELAY_SECONDS", "0") or "0")),
+                "poll_interval_seconds": int(float(os.getenv("CADASTRAL_SYNC_POLL_INTERVAL_SECONDS", "30") or "30")),
+                "import_timeout_seconds": int(float(os.getenv("CADASTRAL_SYNC_IMPORT_TIMEOUT_SECONDS", "14400") or "14400")),
+                "max_direct_download_mb": float(os.getenv("CADASTRAL_SYNC_MAX_DIRECT_DOWNLOAD_MB", "500") or "500"),
+                "cleanup_on_success": str(os.getenv("CADASTRAL_SYNC_CLEANUP_ON_SUCCESS", "1")).strip().lower()
+                in {"1", "true", "t", "yes", "y", "on"},
+                "max_files": int(float(os.getenv("CADASTRAL_SYNC_MAX_FILES", "0") or "0")),
+                "credentials_configured": bool(os.getenv("VWORLD_USER_ID", "").strip())
+                and bool(os.getenv("VWORLD_USER_PASSWORD", "").strip()),
+            },
+        }
+    )
+
+
+@app.get("/v1/admin/building-integrated-sync/status")
+def get_building_integrated_sync_status(
+    x_admin_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    sync_dir = _building_integrated_sync_dir()
+    cycle_manifest = _read_json_file(sync_dir / "cycle_manifest.json") or {}
+    latest_run = cycle_manifest.get("latest") if isinstance(cycle_manifest.get("latest"), dict) else None
+    local_work = _cadastral_sync_local_work(sync_dir)
+
+    active_release = None
+    latest_job = None
+    recent_update_files: list[dict[str, Any]] = []
+    update_file_count = 0
+    try:
+        with psycopg.connect(_db_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      id, version, data_type, source_name, status, is_active, records_count,
+                      metadata, created_at, updated_at, activated_at
+                    FROM cadastral_release
+                    WHERE data_type = 'building_integrated_info'
+                      AND is_active = TRUE
+                    ORDER BY activated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    active_release = _release_row_to_dict(row)
+
+                cur.execute(
+                    """
+                    SELECT
+                      j.id, j.release_id, r.version, j.status, j.source_path,
+                      j.total_files, j.processed_files, j.inserted_rows, j.error_message,
+                      j.created_at, j.started_at, j.finished_at, j.updated_at,
+                      COALESCE(j.data_type, r.data_type, 'building_integrated_info') AS data_type
+                    FROM cadastral_import_job j
+                    LEFT JOIN cadastral_release r ON r.id = j.release_id
+                    WHERE COALESCE(j.data_type, r.data_type, 'building_integrated_info') = 'building_integrated_info'
+                    ORDER BY j.id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    latest_job = _import_job_row_to_dict(row)
+
+                update_rows = _load_recent_update_file_rows(conn, data_type="building_integrated_info", limit=8, offset=0)
+                recent_update_files = [_update_file_row_to_dict(item) for item in update_rows]
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM dataset_import_file f
+                    LEFT JOIN cadastral_release r ON r.id = f.release_id
+                    WHERE COALESCE(f.data_type, r.data_type, 'building_integrated_info') = 'building_integrated_info'
+                      AND COALESCE(r.metadata ->> 'operation_mode', '') = 'update'
+                    """
+                )
+                count_row = cur.fetchone()
+                update_file_count = int(count_row[0] or 0) if count_row else 0
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to load building integrated sync status: {exc}")
+
+    scheduler = _incremental_sync_scheduler_state(
+        env_prefix="BUILDING_INTEGRATED_SYNC",
+        latest_run=latest_run,
+        latest_job=latest_job,
+        local_work=local_work,
+    )
+
+    return ok(
+        {
+            "sync_dir": str(sync_dir),
+            "manifest_exists": bool(cycle_manifest),
+            "active_release": active_release,
+            "scheduler": scheduler,
+            "latest_run": latest_run,
+            "latest_job": latest_job,
+            "recent_update_files": recent_update_files,
+            "update_file_count": update_file_count,
+            "local_work": local_work,
+            "config": {
+                "check_interval_seconds": int(float(os.getenv("BUILDING_INTEGRATED_SYNC_CHECK_INTERVAL_SECONDS", "86400") or "86400")),
+                "retry_interval_seconds": int(float(os.getenv("BUILDING_INTEGRATED_SYNC_RETRY_SECONDS", "3600") or "3600")),
+                "initial_delay_seconds": int(float(os.getenv("BUILDING_INTEGRATED_SYNC_INITIAL_DELAY_SECONDS", "0") or "0")),
+                "poll_interval_seconds": int(float(os.getenv("BUILDING_INTEGRATED_SYNC_POLL_INTERVAL_SECONDS", "30") or "30")),
+                "import_timeout_seconds": int(float(os.getenv("BUILDING_INTEGRATED_SYNC_IMPORT_TIMEOUT_SECONDS", "14400") or "14400")),
+                "max_direct_download_mb": float(os.getenv("BUILDING_INTEGRATED_SYNC_MAX_DIRECT_DOWNLOAD_MB", "500") or "500"),
+                "cleanup_on_success": str(os.getenv("BUILDING_INTEGRATED_SYNC_CLEANUP_ON_SUCCESS", "1")).strip().lower()
+                in {"1", "true", "t", "yes", "y", "on"},
+                "max_files": int(float(os.getenv("BUILDING_INTEGRATED_SYNC_MAX_FILES", "0") or "0")),
+                "credentials_configured": bool(os.getenv("VWORLD_USER_ID", "").strip())
+                and bool(os.getenv("VWORLD_USER_PASSWORD", "").strip()),
+            },
+        }
+    )
+
+
+@app.get("/v1/admin/land-movement-sync/status")
+def get_land_movement_sync_status(
+    x_admin_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    sync_dir = _land_movement_sync_dir()
+    cycle_manifest = _read_json_file(sync_dir / "cycle_manifest.json") or {}
+    latest_run = cycle_manifest.get("latest") if isinstance(cycle_manifest.get("latest"), dict) else None
+    local_work = _land_movement_sync_local_work(sync_dir)
+
+    data_type = "land_info_al_d157"
+    active_release = None
+    latest_job = None
+    recent_update_files: list[dict[str, Any]] = []
+    update_file_count = 0
+    try:
+        with psycopg.connect(_db_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      id, version, data_type, source_name, status, is_active, records_count,
+                      metadata, created_at, updated_at, activated_at
+                    FROM cadastral_release
+                    WHERE data_type = %s
+                      AND is_active = TRUE
+                    ORDER BY activated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """,
+                    (data_type,),
+                )
+                row = cur.fetchone()
+                if row:
+                    active_release = _release_row_to_dict(row)
+
+                cur.execute(
+                    """
+                    SELECT
+                      j.id, j.release_id, r.version, j.status, j.source_path,
+                      j.total_files, j.processed_files, j.inserted_rows, j.error_message,
+                      j.created_at, j.started_at, j.finished_at, j.updated_at,
+                      COALESCE(j.data_type, r.data_type, %s) AS data_type
+                    FROM cadastral_import_job j
+                    LEFT JOIN cadastral_release r ON r.id = j.release_id
+                    WHERE COALESCE(j.data_type, r.data_type, %s) = %s
+                    ORDER BY j.id DESC
+                    LIMIT 1
+                    """,
+                    (data_type, data_type, data_type),
+                )
+                row = cur.fetchone()
+                if row:
+                    latest_job = _import_job_row_to_dict(row)
+
+                cur.execute(
+                    """
+                    SELECT
+                      f.id, f.release_id, r.version,
+                      COALESCE(f.data_type, r.data_type, %s) AS data_type,
+                      f.file_name, f.file_size, f.created_at, r.is_active, r.status
+                    FROM dataset_import_file f
+                    LEFT JOIN cadastral_release r ON r.id = f.release_id
+                    WHERE COALESCE(f.data_type, r.data_type, %s) = %s
+                      AND f.file_name LIKE 'CH_D157%%'
+                    ORDER BY f.id DESC
+                    LIMIT 8
+                    """,
+                    (data_type, data_type, data_type),
+                )
+                recent_update_files = [_update_file_row_to_dict(item) for item in cur.fetchall()]
+
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM dataset_import_file f
+                    LEFT JOIN cadastral_release r ON r.id = f.release_id
+                    WHERE COALESCE(f.data_type, r.data_type, %s) = %s
+                      AND f.file_name LIKE 'CH_D157%%'
+                    """,
+                    (data_type, data_type),
+                )
+                count_row = cur.fetchone()
+                update_file_count = int(count_row[0] or 0) if count_row else 0
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to load land movement sync status: {exc}")
+
+    scheduler = _incremental_sync_scheduler_state(
+        env_prefix="LAND_MOVEMENT_SYNC",
+        latest_run=latest_run,
+        latest_job=latest_job,
+        local_work=local_work,
+    )
+
+    return ok(
+        {
+            "sync_dir": str(sync_dir),
+            "manifest_exists": bool(cycle_manifest),
+            "active_release": active_release,
+            "scheduler": scheduler,
+            "latest_run": latest_run,
+            "latest_job": latest_job,
+            "recent_update_files": recent_update_files,
+            "update_file_count": update_file_count,
+            "local_work": local_work,
+            "config": {
+                "check_interval_seconds": int(float(os.getenv("LAND_MOVEMENT_SYNC_CHECK_INTERVAL_SECONDS", "86400") or "86400")),
+                "retry_interval_seconds": int(float(os.getenv("LAND_MOVEMENT_SYNC_RETRY_SECONDS", "3600") or "3600")),
+                "initial_delay_seconds": int(float(os.getenv("LAND_MOVEMENT_SYNC_INITIAL_DELAY_SECONDS", "0") or "0")),
+                "poll_interval_seconds": int(float(os.getenv("LAND_MOVEMENT_SYNC_POLL_INTERVAL_SECONDS", "30") or "30")),
+                "import_timeout_seconds": int(float(os.getenv("LAND_MOVEMENT_SYNC_IMPORT_TIMEOUT_SECONDS", "14400") or "14400")),
+                "max_direct_download_mb": float(os.getenv("LAND_MOVEMENT_SYNC_MAX_DIRECT_DOWNLOAD_MB", "500") or "500"),
+                "cleanup_on_success": str(os.getenv("LAND_MOVEMENT_SYNC_CLEANUP_ON_SUCCESS", "1")).strip().lower()
+                in {"1", "true", "t", "yes", "y", "on"},
+                "max_files": int(float(os.getenv("LAND_MOVEMENT_SYNC_MAX_FILES", "0") or "0")),
+                "credentials_configured": bool(os.getenv("VWORLD_USER_ID", "").strip())
+                and bool(os.getenv("VWORLD_USER_PASSWORD", "").strip()),
+            },
+        }
+    )
+
+
+@app.get("/v1/admin/land-info-sync/status")
+def get_land_info_sync_status(
+    x_admin_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    _require_admin(x_admin_token)
+    sync_dir = _land_info_sync_dir()
+    worker_dir = _land_info_worker_dir()
+    cycle_manifest = _read_json_file(sync_dir / "cycle_manifest.json") or {}
+    latest_run = cycle_manifest.get("latest") if isinstance(cycle_manifest.get("latest"), dict) else None
+    local_work = _land_info_sync_local_work(sync_dir, worker_dir)
+
+    active_release = None
+    component_releases: dict[str, dict[str, Any]] = {}
+    latest_job = None
+    recent_import_files: list[dict[str, Any]] = []
+    import_file_count = 0
+    dataset_presence: dict[str, bool] = {}
+    family_data_types = ["land_info", *sorted(LAND_INFO_COMPONENT_DATA_TYPES)]
+    try:
+        component_releases = _active_land_info_component_releases(force_refresh=True)
+        with psycopg.connect(_db_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      id, version, data_type, source_name, status, is_active, records_count,
+                      metadata, created_at, updated_at, activated_at
+                    FROM cadastral_release
+                    WHERE data_type = 'land_info'
+                      AND is_active = TRUE
+                    ORDER BY activated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    active_release = _release_row_to_dict(row)
+
+                cur.execute(
+                    """
+                    SELECT
+                      j.id, j.release_id, r.version, j.status, j.source_path,
+                      j.total_files, j.processed_files, j.inserted_rows, j.error_message,
+                      j.created_at, j.started_at, j.finished_at, j.updated_at,
+                      COALESCE(j.data_type, r.data_type, 'land_info') AS data_type
+                    FROM cadastral_import_job j
+                    LEFT JOIN cadastral_release r ON r.id = j.release_id
+                    WHERE COALESCE(j.data_type, r.data_type, 'land_info') = ANY(%s)
+                    ORDER BY j.id DESC
+                    LIMIT 1
+                    """,
+                    (family_data_types,),
+                )
+                row = cur.fetchone()
+                if row:
+                    latest_job = _import_job_row_to_dict(row)
+
+                cur.execute(
+                    """
+                    SELECT
+                      f.id, f.release_id, r.version,
+                      COALESCE(f.data_type, r.data_type, 'land_info') AS data_type,
+                      f.file_name, f.file_size, f.created_at, r.is_active, r.status
+                    FROM dataset_import_file f
+                    LEFT JOIN cadastral_release r ON r.id = f.release_id
+                    WHERE COALESCE(f.data_type, r.data_type, 'land_info') = ANY(%s)
+                    ORDER BY f.id DESC
+                    LIMIT 12
+                    """,
+                    (family_data_types,),
+                )
+                recent_import_files = [_update_file_row_to_dict(item) for item in cur.fetchall()]
+
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM dataset_import_file f
+                    LEFT JOIN cadastral_release r ON r.id = f.release_id
+                    WHERE COALESCE(f.data_type, r.data_type, 'land_info') = ANY(%s)
+                    """,
+                    (family_data_types,),
+                )
+                count_row = cur.fetchone()
+                import_file_count = int(count_row[0] or 0) if count_row else 0
+
+                latest_verification = latest_run.get("verification") if isinstance(latest_run, dict) else None
+                if isinstance(latest_verification, dict) and isinstance(latest_verification.get("dataset_presence"), dict):
+                    dataset_presence = dict(latest_verification.get("dataset_presence") or {})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to load land info sync status: {exc}")
+
+    scheduler = _incremental_sync_scheduler_state(
+        env_prefix="LAND_INFO_SYNC",
+        latest_run=latest_run,
+        latest_job=latest_job,
+        local_work=local_work,
+    )
+
+    return ok(
+        {
+            "sync_dir": str(sync_dir),
+            "worker_dir": str(worker_dir),
+            "manifest_exists": bool(cycle_manifest),
+            "active_release": active_release,
+            "component_releases": component_releases,
+            "scheduler": scheduler,
+            "latest_run": latest_run,
+            "latest_job": latest_job,
+            "recent_import_files": recent_import_files,
+            "import_file_count": import_file_count,
+            "dataset_presence": dataset_presence,
+            "local_work": local_work,
+            "direct_worker": _land_info_direct_worker_status(),
+            "config": {
+                "check_interval_seconds": int(float(os.getenv("LAND_INFO_SYNC_CHECK_INTERVAL_SECONDS", "86400") or "86400")),
+                "pending_interval_seconds": int(float(os.getenv("LAND_INFO_SYNC_PENDING_INTERVAL_SECONDS", "600") or "600")),
+                "retry_interval_seconds": int(float(os.getenv("LAND_INFO_SYNC_RETRY_SECONDS", "3600") or "3600")),
+                "initial_delay_seconds": int(float(os.getenv("LAND_INFO_SYNC_INITIAL_DELAY_SECONDS", "0") or "0")),
+                "poll_interval_seconds": int(float(os.getenv("LAND_INFO_SYNC_POLL_INTERVAL_SECONDS", "30") or "30")),
+                "import_timeout_seconds": int(float(os.getenv("LAND_INFO_SYNC_IMPORT_TIMEOUT_SECONDS", "86400") or "86400")),
+                "stable_seconds": int(float(os.getenv("LAND_INFO_SYNC_STABLE_SECONDS", "60") or "60")),
+                "cleanup_on_success": str(os.getenv("LAND_INFO_SYNC_CLEANUP_ON_SUCCESS", "1")).strip().lower()
+                in {"1", "true", "t", "yes", "y", "on"},
+            },
+        }
+    )
 
 
 @app.get("/v1/admin/cadastral/releases")
@@ -6324,6 +8533,667 @@ def simple_data(doc_name: str) -> Dict[str, Any]:
     return ok({"doc_name": doc_name, "data": {}})
 
 
+_SITE_REPORT_USE_LABELS = {
+    "house": "단독주택",
+    "multi": "다가구/다세대",
+    "retail": "근린생활시설",
+    "mixed": "상가주택",
+}
+
+_SITE_REPORT_PRIORITY_LABELS = {
+    "budget": "공사비 우선",
+    "speed": "인허가 속도 우선",
+    "yield": "수익성 우선",
+    "balance": "균형안",
+}
+
+
+def _site_report_number(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        text = str(value).replace(",", "").strip()
+        if not text:
+            return default
+        return float(text)
+    except Exception:
+        return default
+
+
+def _site_report_short_address(address: str) -> str:
+    parts = [part for part in str(address or "").split() if part]
+    return " ".join(parts[:3]) if parts else "입력 대지"
+
+
+def _site_report_money(value: float) -> str:
+    safe = max(0, int(round(value)))
+    if safe >= 10000:
+        eok = safe // 10000
+        rest = safe % 10000
+        if rest:
+            return f"{eok}억 {rest:,}만원"
+        return f"{eok}억원"
+    return f"{safe:,}만원"
+
+
+def _site_report_cost_rate(use: str, priority: str) -> dict[str, float]:
+    base_by_use = {
+        "house": {"low": 850.0, "high": 1120.0},
+        "multi": {"low": 780.0, "high": 980.0},
+        "retail": {"low": 760.0, "high": 1040.0},
+        "mixed": {"low": 820.0, "high": 1080.0},
+    }
+    base = dict(base_by_use.get(use, base_by_use["mixed"]))
+    if priority == "budget":
+        return {"low": base["low"] * 0.92, "high": base["high"] * 0.96}
+    if priority == "yield":
+        return {"low": base["low"] * 1.04, "high": base["high"] * 1.12}
+    return base
+
+
+def _site_report_floor_plan(use: str) -> dict[str, Any]:
+    rooms_by_use = {
+        "house": [
+            {"label": "거실", "size": "12평", "x": 34, "y": 36, "w": 112, "h": 82, "accent": True},
+            {"label": "주방", "size": "7평", "x": 183, "y": 36, "w": 84, "h": 82},
+            {"label": "침실", "size": "8평", "x": 304, "y": 36, "w": 76, "h": 82},
+            {"label": "안방", "size": "10평", "x": 34, "y": 154, "w": 112, "h": 164},
+            {"label": "욕실", "size": "3평", "x": 183, "y": 154, "w": 82, "h": 62},
+            {"label": "서재", "size": "5평", "x": 304, "y": 256, "w": 76, "h": 62},
+        ],
+        "multi": [
+            {"label": "세대 A", "size": "14평", "x": 34, "y": 36, "w": 112, "h": 82, "accent": True},
+            {"label": "세대 B", "size": "13평", "x": 183, "y": 36, "w": 197, "h": 82},
+            {"label": "계단실", "size": "5평", "x": 34, "y": 154, "w": 112, "h": 164},
+            {"label": "세대 C", "size": "12평", "x": 183, "y": 154, "w": 82, "h": 62},
+            {"label": "세대 D", "size": "12평", "x": 304, "y": 256, "w": 76, "h": 62},
+        ],
+        "retail": [
+            {"label": "매장", "size": "22평", "x": 34, "y": 36, "w": 112, "h": 82, "accent": True},
+            {"label": "전시", "size": "12평", "x": 183, "y": 36, "w": 197, "h": 82},
+            {"label": "창고", "size": "6평", "x": 34, "y": 154, "w": 112, "h": 164},
+            {"label": "사무", "size": "5평", "x": 183, "y": 154, "w": 82, "h": 62},
+            {"label": "화장실", "size": "3평", "x": 304, "y": 256, "w": 76, "h": 62},
+        ],
+        "mixed": [
+            {"label": "상가", "size": "16평", "x": 34, "y": 36, "w": 112, "h": 82, "accent": True},
+            {"label": "주차", "size": "8평", "x": 183, "y": 36, "w": 84, "h": 82},
+            {"label": "계단", "size": "4평", "x": 304, "y": 36, "w": 76, "h": 82},
+            {"label": "거실", "size": "10평", "x": 34, "y": 154, "w": 112, "h": 164},
+            {"label": "주방", "size": "5평", "x": 183, "y": 154, "w": 82, "h": 62},
+            {"label": "침실", "size": "7평", "x": 304, "y": 256, "w": 76, "h": 62},
+        ],
+    }
+    return {
+        "name": _SITE_REPORT_USE_LABELS.get(use, _SITE_REPORT_USE_LABELS["mixed"]),
+        "rooms": rooms_by_use.get(use, rooms_by_use["mixed"]),
+    }
+
+
+def _site_report_data_count(value: Any, key: str = "items") -> int:
+    if isinstance(value, dict):
+        data = value.get("data")
+        if isinstance(data, dict):
+            count = data.get("count")
+            if isinstance(count, int):
+                return count
+            items = data.get(key)
+            if isinstance(items, list):
+                return len(items)
+        items = value.get(key)
+        if isinstance(items, list):
+            return len(items)
+    if isinstance(value, list):
+        return len(value)
+    return 0
+
+
+def _site_report_clip(value: Any, limit: int) -> Any:
+    if limit <= 0:
+        return ""
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + "...(truncated)"
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        out: list[Any] = []
+        budget = limit
+        for item in value[:20]:
+            clipped = _site_report_clip(item, max(200, budget // 2))
+            out.append(clipped)
+            budget -= len(json.dumps(clipped, ensure_ascii=False, default=str))
+            if budget <= 0:
+                break
+        return out
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        budget = limit
+        for key, item in value.items():
+            clipped = _site_report_clip(item, max(200, budget // 2))
+            out[str(key)] = clipped
+            budget -= len(json.dumps({str(key): clipped}, ensure_ascii=False, default=str))
+            if budget <= 0:
+                break
+        return out
+    return str(value)[:limit]
+
+
+def _collect_site_plan_report_data(pnu: str, supplied_data: Any = None) -> dict[str, Any]:
+    supplied = supplied_data if isinstance(supplied_data, dict) else {}
+    data: dict[str, Any] = {
+        "pnu": pnu,
+        "land_info": supplied.get("landInfo"),
+        "building_info": supplied.get("buildingInfo"),
+        "land_geo": supplied.get("landGeo"),
+        "building_violations": supplied.get("buildingViolations"),
+        "source": "supplied",
+    }
+
+    if not pnu:
+        return data
+
+    data["source"] = "server"
+    try:
+        data["land_info"] = {"records": _fetch_dataset_records("land_info", pnu, limit=40)}
+    except Exception as exc:
+        data["land_info_error"] = str(exc)
+
+    try:
+        building_line = _fetch_building_info_line(pnu)
+        data["building_info"] = {"lines": [building_line] if building_line else []}
+    except Exception as exc:
+        data["building_info_error"] = str(exc)
+
+    try:
+        land_items = _fetch_cadastral_geo_items(
+            pnu,
+            limit=120,
+            include_surroundings=True,
+            surroundings_padding_ratio=0.35,
+        )
+        data["land_geo"] = {
+            "count": len(land_items),
+            "items": [
+                {
+                    "pnu": item.get("pnu"),
+                    "label": item.get("label"),
+                    "bbox": _geometry_bbox(item.get("geometry")) if isinstance(item.get("geometry"), dict) else None,
+                }
+                for item in land_items[:20]
+            ],
+        }
+    except Exception as exc:
+        data["land_geo_error"] = str(exc)
+
+    try:
+        building_items = _fetch_building_geo_with_violation(pnu, limit=300)
+        violation_items = [
+            item
+            for item in building_items
+            if isinstance(item.get("violation"), dict) and item["violation"].get("is_violation") is True
+        ]
+        data["building_violations"] = {
+            "count": len(building_items),
+            "has_violation": len(violation_items) > 0,
+            "items": [
+                {
+                    "building_name": item.get("building_name"),
+                    "building_id": item.get("building_legacy_id") or item.get("building_id"),
+                    "violation": item.get("violation"),
+                }
+                for item in building_items[:30]
+            ],
+        }
+    except Exception as exc:
+        data["building_violations_error"] = str(exc)
+
+    return data
+
+
+def _site_report_basis(site_data: dict[str, Any]) -> dict[str, str]:
+    land_count = _site_report_data_count(site_data.get("land_geo"))
+    land_record_count = _site_report_data_count(site_data.get("land_info"), key="records")
+    building_lines = _site_report_data_count(site_data.get("building_info"), key="lines")
+    violations = site_data.get("building_violations")
+    has_violation = None
+    if isinstance(violations, dict):
+        payload = violations.get("data") if isinstance(violations.get("data"), dict) else violations
+        has_violation = payload.get("has_violation") if isinstance(payload, dict) else None
+
+    return {
+        "land": f"{land_count or land_record_count}개 데이터 조회" if (land_count or land_record_count) else "조회 대기",
+        "building": f"{building_lines}개 대장 라인" if building_lines else "조회 대기",
+        "violation": "위반 이력 있음" if has_violation is True else "위반 이력 없음" if has_violation is False else "검토 필요",
+    }
+
+
+def _build_site_plan_report_draft(body: dict[str, Any], site_data: dict[str, Any]) -> dict[str, Any]:
+    address = str(body.get("address") or "입력 대지").strip() or "입력 대지"
+    pnu = str(body.get("pnu") or "").strip()
+    use = str(body.get("use") or "mixed").strip()
+    priority = str(body.get("priority") or "balance").strip()
+    area = max(10.0, _site_report_number(body.get("area_pyeong") or body.get("area") or 45, 45.0))
+    budget = max(0.0, _site_report_number(body.get("budget_manwon") or body.get("budget") or 0, 0.0))
+    use_label = _SITE_REPORT_USE_LABELS.get(use, _SITE_REPORT_USE_LABELS["mixed"])
+    priority_label = _SITE_REPORT_PRIORITY_LABELS.get(priority, _SITE_REPORT_PRIORITY_LABELS["balance"])
+    rates = _site_report_cost_rate(use, priority)
+    low = round(area * rates["low"])
+    high = round(area * rates["high"])
+    basis = _site_report_basis(site_data)
+    budget_fit = budget >= low if budget else False
+    today = time.strftime("%Y. %-m. %-d.") if os.name != "nt" else time.strftime("%Y. %#m. %#d.")
+
+    design_by_use = {
+        "house": "거실과 주방을 채광이 좋은 면에 두고, 침실은 소음이 적은 후면으로 분리합니다.",
+        "multi": "반복 가능한 세대 모듈과 단순한 코어를 우선해 공사비와 인허가 변수를 줄입니다.",
+        "retail": "도로 접근부의 가시성과 진입 동선을 우선하고 후면에 창고·관리 영역을 둡니다.",
+        "mixed": "1층 근린생활시설과 상부 주거의 출입 동선을 명확히 분리합니다.",
+    }
+    design_by_priority = {
+        "budget": "골조와 외피를 단순화하고 습식 공간을 모아 공사비 변동 폭을 낮춥니다.",
+        "speed": "법규 해석이 단순한 매스와 층별 프로그램으로 인허가 검토 시간을 줄입니다.",
+        "yield": "임대 가능한 면을 도로 접근부에 배치하고 공용부 면적을 압축합니다.",
+        "balance": "채광, 임대성, 공사비를 균형 있게 맞춘 중간 밀도 안을 우선합니다.",
+    }
+
+    return {
+        "title": f"{_site_report_short_address(address)} 대지 리포트",
+        "type": "서버 초안",
+        "date": today,
+        "recommendation": f"{use_label} {priority_label} 설계안",
+        "summary": (
+            f"{address} 기준으로 {area:g}평 규모의 배치와 공사비 범위를 산정했습니다. "
+            "실제 인허가와 견적은 현장 조사, 지자체 조례, 구조·설비 검토 후 확정됩니다."
+        ),
+        "metrics": [
+            {"label": "권장 규모", "value": f"{area:g}평", "caption": "사용자 입력 기준"},
+            {"label": "공사비 범위", "value": f"{_site_report_money(low)}~{_site_report_money(high)}", "caption": "개략 추정"},
+            {"label": "예산 적합도", "value": "양호" if budget_fit else "조정 필요", "caption": f"{_site_report_money(budget)} 입력" if budget else "예산 미입력"},
+            {"label": "데이터 근거", "value": "PNU 연결" if pnu else "주소 기준", "caption": pnu or "후보 선택 대기"},
+        ],
+        "design": [
+            design_by_use.get(use, design_by_use["mixed"]),
+            design_by_priority.get(priority, design_by_priority["balance"]),
+            "조회 데이터와 현장 조건을 대조해 접도, 채광, 주차, 피난 동선을 우선 검토합니다.",
+        ],
+        "costNote": (
+            f"{use_label}의 목표 연면적 {area:g}평을 기준으로 {_site_report_money(low)}에서 "
+            f"{_site_report_money(high)} 사이가 1차 범위입니다. 지하층, 철거, 특수 구조, "
+            "외장재 사양, 민원 대응 비용은 별도 검토 항목입니다."
+        ),
+        "risks": [
+            "지자체 조례와 도로 접도 조건을 추가 확인해야 합니다." if pnu else "PNU가 확정되면 지적 형상과 토지 정보를 정밀 조회합니다.",
+            "기존 건축물·위반 여부는 최신 공부와 현장 확인이 필요합니다.",
+            "실제 견적은 실시설계 도면과 구조·기계·전기 사양 확정 후 보정합니다.",
+        ],
+        "basis": basis,
+        "floorPlan": _site_report_floor_plan(use),
+    }
+
+
+def _site_report_extract_json(text: str) -> dict[str, Any] | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(raw[start : end + 1])
+                return parsed if isinstance(parsed, dict) else None
+            except Exception:
+                return None
+    return None
+
+
+def _normalize_site_report(ai_report: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(ai_report, dict):
+        return fallback
+
+    result = dict(fallback)
+    for key in ("title", "type", "date", "recommendation", "summary", "costNote"):
+        value = ai_report.get(key)
+        if isinstance(value, str) and value.strip():
+            result[key] = value.strip()
+
+    for key in ("design", "risks"):
+        value = ai_report.get(key)
+        if isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item).strip()]
+            if items:
+                result[key] = items[:5]
+
+    metrics = ai_report.get("metrics")
+    if isinstance(metrics, list):
+        normalized_metrics = []
+        for item in metrics:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            value = str(item.get("value") or "").strip()
+            caption = str(item.get("caption") or "").strip()
+            if label and value:
+                normalized_metrics.append({"label": label, "value": value, "caption": caption})
+        if len(normalized_metrics) >= 4:
+            result["metrics"] = normalized_metrics[:4]
+
+    basis = ai_report.get("basis")
+    if isinstance(basis, dict):
+        result["basis"] = {
+            "land": str(basis.get("land") or fallback["basis"]["land"]),
+            "building": str(basis.get("building") or fallback["basis"]["building"]),
+            "violation": str(basis.get("violation") or fallback["basis"]["violation"]),
+        }
+
+    floor_plan = ai_report.get("floorPlan")
+    if isinstance(floor_plan, dict):
+        fallback_plan = fallback.get("floorPlan", {})
+        rooms = floor_plan.get("rooms")
+        normalized_rooms = []
+        if isinstance(rooms, list):
+            for room in rooms:
+                if not isinstance(room, dict):
+                    continue
+                label = str(room.get("label") or "").strip()
+                size = str(room.get("size") or "").strip()
+                if not label or not size:
+                    continue
+                normalized_rooms.append(
+                    {
+                        "label": label,
+                        "size": size,
+                        "x": int(_site_report_number(room.get("x"), 34)),
+                        "y": int(_site_report_number(room.get("y"), 36)),
+                        "w": int(_site_report_number(room.get("w"), 90)),
+                        "h": int(_site_report_number(room.get("h"), 70)),
+                        "accent": bool(room.get("accent", False)),
+                    }
+                )
+        result["floorPlan"] = {
+            "name": str(floor_plan.get("name") or fallback_plan.get("name") or "예상 평면"),
+            "rooms": normalized_rooms[:8] if normalized_rooms else fallback_plan.get("rooms", []),
+        }
+
+    return result
+
+
+def _build_site_report_prompt(body: dict[str, Any], site_data: dict[str, Any]) -> tuple[str, str]:
+    max_chars = int(_site_report_number(os.getenv("OPENAI_REPORT_DATA_LIMIT_CHARS"), 28000))
+    compact_data = _site_report_clip(site_data, max(4000, max_chars))
+    request_context = {
+        "address": body.get("address"),
+        "pnu": body.get("pnu"),
+        "use": body.get("use"),
+        "area_pyeong": body.get("area_pyeong") or body.get("area"),
+        "budget_manwon": body.get("budget_manwon") or body.get("budget"),
+        "priority": body.get("priority"),
+    }
+    system_prompt = (
+        "당신은 한국 건축 기획 보고서를 작성하는 시니어 건축 컨설턴트입니다. "
+        "제공된 토지·건축물 데이터를 근거로 하되, 인허가와 견적은 현장 조사와 전문가 검토 후 확정된다는 점을 명확히 유지하세요. "
+        "응답은 반드시 한국어 JSON 객체만 반환하세요."
+    )
+    user_prompt = (
+        "대지 리포트를 작성하세요.\n\n"
+        f"요청 정보:\n{json.dumps(request_context, ensure_ascii=False)}\n\n"
+        f"서버 조회 데이터:\n{json.dumps(compact_data, ensure_ascii=False, default=str)}\n\n"
+        "반환 JSON 스키마:\n"
+        "{"
+        "\"title\": string,"
+        "\"type\": \"GPT 분석 리포트\","
+        "\"date\": string,"
+        "\"recommendation\": string,"
+        "\"summary\": string,"
+        "\"metrics\": [{\"label\": string, \"value\": string, \"caption\": string}],"
+        "\"design\": [string],"
+        "\"costNote\": string,"
+        "\"risks\": [string],"
+        "\"basis\": {\"land\": string, \"building\": string, \"violation\": string},"
+        "\"floorPlan\": {\"name\": string, \"rooms\": [{\"label\": string, \"size\": string, \"x\": number, \"y\": number, \"w\": number, \"h\": number, \"accent\": boolean}]}"
+        "}\n\n"
+        "규칙: metrics는 정확히 4개, design은 3~5개, risks는 3~5개로 작성하세요. "
+        "floorPlan.rooms 좌표는 x 18~330, y 18~285, w 50~210, h 45~170 범위 안에서 SVG 평면도에 들어가게 작성하세요. "
+        "공사비는 만원 또는 억원 단위로 표시하고 확정 견적처럼 단정하지 마세요."
+    )
+    return system_prompt, user_prompt
+
+
+def _request_openai_site_report(body: dict[str, Any], site_data: dict[str, Any]) -> dict[str, Any]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+
+    model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip() or "gpt-5.5"
+    max_tokens = int(_site_report_number(os.getenv("OPENAI_REPORT_MAX_COMPLETION_TOKENS"), 3500))
+    timeout = float(_site_report_number(os.getenv("OPENAI_REPORT_TIMEOUT_SEC"), 60))
+    system_prompt, user_prompt = _build_site_report_prompt(body, site_data)
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "max_completion_tokens": max(1200, max_tokens),
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read().decode("utf-8", "replace")
+    parsed = json.loads(raw)
+    content = parsed["choices"][0]["message"]["content"]
+    ai_report = _site_report_extract_json(content)
+    if not ai_report:
+        raise RuntimeError("OpenAI response did not contain a JSON report")
+    return {"model": model, "report": ai_report}
+
+
+@app.post("/v1/reports/site-plan")
+def create_site_plan_report(body: Dict[str, Any]) -> Dict[str, Any]:
+    address = str(body.get("address") or "").strip()
+    if not address:
+        raise HTTPException(status_code=400, detail="address is required")
+
+    pnu = str(body.get("pnu") or "").strip()
+    site_data = _collect_site_plan_report_data(pnu, body.get("data"))
+    fallback = _build_site_plan_report_draft(body, site_data)
+    model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip() or "gpt-5.5"
+
+    try:
+        ai_result = _request_openai_site_report(body, site_data)
+        report = _normalize_site_report(ai_result.get("report"), fallback)
+        report["type"] = report.get("type") or "GPT 분석 리포트"
+        return ok(
+            {
+                "report": report,
+                "generated_by": "openai",
+                "model": ai_result.get("model") or model,
+                "basis": _site_report_basis(site_data),
+            }
+        )
+    except Exception as exc:
+        logger.warning("site plan report fell back to server draft: %s", exc)
+        return ok(
+            {
+                "report": fallback,
+                "generated_by": "server_draft",
+                "model": model,
+                "warning": str(exc)[:240],
+                "basis": _site_report_basis(site_data),
+            }
+        )
+
+
+def _fetch_building_info_active_release_summary() -> dict[str, Any] | None:
+    try:
+        with psycopg.connect(_db_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, version, source_name, status, is_active, records_count, activated_at, updated_at
+                    FROM cadastral_release
+                    WHERE data_type = 'building_info'
+                      AND is_active = TRUE
+                    ORDER BY activated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to load active building_info release: {exc}")
+
+    if not row:
+        return None
+
+    return {
+        "id": row[0],
+        "version": row[1],
+        "source_name": row[2],
+        "status": row[3],
+        "is_active": row[4],
+        "records_count": row[5],
+        "activated_at": row[6],
+        "updated_at": row[7],
+    }
+
+
+def _select_building_info_verify_pnu(release_id: int) -> str | None:
+    try:
+        with psycopg.connect(_db_url()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT pnu
+                    FROM building_info_lookup
+                    WHERE release_id = %s
+                      AND COALESCE(pnu, '') <> ''
+                    ORDER BY pnu
+                    LIMIT 1
+                    """,
+                    (release_id,),
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    return str(row[0])
+
+                cur.execute(
+                    """
+                    SELECT pnu
+                    FROM building_info_line
+                    WHERE release_id = %s
+                      AND COALESCE(pnu, '') <> ''
+                    ORDER BY pnu
+                    LIMIT 1
+                    """,
+                    (release_id,),
+                )
+                row = cur.fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to select building_info verification pnu: {exc}")
+
+    if not row or not row[0]:
+        return None
+    return str(row[0])
+
+
+def _decode_building_info_client_payload(line: str, pnu: str) -> dict[str, Any]:
+    raw = str(line or "")
+    payload_text = ""
+    for candidate in _pnu_query_candidates(pnu):
+        if candidate and raw.startswith(candidate):
+            payload_text = raw[len(candidate) :]
+            break
+    if not payload_text:
+        json_start = raw.find("{")
+        if json_start >= 0:
+            payload_text = raw[json_start:]
+    if not payload_text:
+        return {}
+
+    try:
+        parsed = json.loads(payload_text)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _building_info_bucket_counts(payload: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for bucket in ("total", "single", "floor", "room"):
+        value = payload.get(bucket)
+        counts[bucket] = len(value) if isinstance(value, list) else 0
+    return counts
+
+
+@app.get("/v1/data/building_info/verify")
+def verify_building_info_client_fetch(
+    pnu: str | None = Query(None),
+    include_sample: bool = Query(False),
+) -> Dict[str, Any]:
+    release = _fetch_building_info_active_release_summary()
+    if not release:
+        raise HTTPException(status_code=503, detail="active building_info release is not available")
+
+    requested_pnu = str(pnu or "").strip()
+    selected_pnu = requested_pnu or _select_building_info_verify_pnu(int(release["id"]))
+    if not selected_pnu:
+        raise HTTPException(status_code=503, detail="no building_info sample pnu is available")
+
+    started_at = time.perf_counter()
+    line = _fetch_building_info_line(selected_pnu)
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    if not line:
+        status_code = 404 if requested_pnu else 503
+        raise HTTPException(status_code=status_code, detail=f"building_info payload not found for pnu={selected_pnu}")
+
+    payload = _decode_building_info_client_payload(line, selected_pnu)
+    bucket_counts = _building_info_bucket_counts(payload)
+    has_payload = any(bucket_counts.values())
+    if not has_payload:
+        raise HTTPException(status_code=503, detail=f"building_info payload could not be decoded for pnu={selected_pnu}")
+
+    client_endpoint = f"/v1/data/building_info/{urllib.parse.quote(selected_pnu)}?format=compressed"
+    result: dict[str, Any] = {
+        "status": "ok",
+        "collection": "building_info",
+        "pnu": selected_pnu,
+        "sample_source": "request" if requested_pnu else "active_release",
+        "release": release,
+        "client_endpoint": client_endpoint,
+        "checks": {
+            "active_release": True,
+            "client_fetch": True,
+            "payload_decoded": True,
+            "has_payload": has_payload,
+        },
+        "response": {
+            "format": "compressed",
+            "part_count": 1,
+            "first_part_bytes": len(line.encode("utf-8")),
+            "elapsed_ms": elapsed_ms,
+        },
+        "bucket_counts": bucket_counts,
+        "has_meta": isinstance(payload.get("meta"), dict),
+    }
+    if include_sample:
+        result["sample"] = {"format": "compressed", "parts": [line]}
+    return ok(result)
+
+
 @app.get("/v1/data/{collection}/{pnu}")
 def get_data(
     collection: str,
@@ -6340,7 +9210,18 @@ def get_data(
             return ok({"format": "lines", "lines": [line]})
         return ok({"format": "compressed", "parts": [line]})
 
-    if collection in {"building_integrated_info", "land_info"}:
+    if collection == "land_info":
+        records = _fetch_dataset_records(collection, pnu)
+        if not records:
+            if format == "lines":
+                return ok({"format": "lines", "lines": []})
+            return ok({"format": "compressed", "parts": []})
+        legacy_line = pnu + json.dumps(_land_info_records_to_legacy_payload(records), ensure_ascii=False)
+        if format == "lines":
+            return ok({"format": "lines", "lines": [legacy_line]})
+        return ok({"format": "compressed", "parts": [legacy_line]})
+
+    if collection == "building_integrated_info":
         records = _fetch_dataset_records(collection, pnu)
         if format == "lines":
             lines = [json.dumps(item["payload"], ensure_ascii=False) for item in records]
@@ -6512,23 +9393,261 @@ def get_land_features(body: Dict[str, Any]) -> Dict[str, Any]:
     return ok([])
 
 
+def _kakao_rest_api_key() -> str:
+    for key in ("KAKAO_REST_API_KEY", "KAKAO_API_KEY", "KAKAO_LOCAL_REST_API_KEY"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _kakao_get_json(path: str, params: dict[str, Any]) -> dict[str, Any]:
+    api_key = _kakao_rest_api_key()
+    if not api_key:
+        raise RuntimeError("KAKAO_REST_API_KEY is not set")
+
+    query = urllib.parse.urlencode(
+        {key: value for key, value in params.items() if value is not None},
+        doseq=True,
+    )
+    url = f"https://dapi.kakao.com{path}?{query}"
+    request = urllib.request.Request(
+        url,
+        headers={"Authorization": f"KakaoAK {api_key}"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        return json.loads(response.read().decode("utf-8", "replace"))
+
+
+def _digits_only(value: Any) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _pnu_from_kakao_address(address: Any) -> str:
+    if not isinstance(address, dict):
+        return ""
+    b_code = _digits_only(address.get("b_code"))
+    main_no = _digits_only(address.get("main_address_no"))
+    sub_no = _digits_only(address.get("sub_address_no"))
+    if len(b_code) != 10 or not main_no:
+        return ""
+    land_type = "2" if str(address.get("mountain_yn") or "").upper() == "Y" else "1"
+    return f"{b_code}{land_type}{main_no.zfill(4)}{(sub_no or '0').zfill(4)}"
+
+
+def _normalize_kakao_address_doc(doc: Any) -> dict[str, Any] | None:
+    if not isinstance(doc, dict):
+        return None
+    item = dict(doc)
+    address = item.get("address")
+    road_address = item.get("road_address")
+    if not isinstance(address, dict):
+        address = {}
+    if not isinstance(road_address, dict):
+        road_address = {}
+
+    pnu = _pnu_from_kakao_address(address)
+    address_name = str(
+        item.get("address_name")
+        or address.get("address_name")
+        or item.get("road_address_name")
+        or road_address.get("address_name")
+        or item.get("place_name")
+        or ""
+    )
+    road_address_name = str(
+        item.get("road_address_name")
+        or road_address.get("address_name")
+        or ""
+    )
+
+    item["pnu"] = pnu
+    item["address_name"] = address_name
+    item["road_address_name"] = road_address_name
+    item["building_name"] = str(road_address.get("building_name") or item.get("place_name") or "")
+    item["source"] = item.get("source") or "kakao"
+    return item
+
+
+def _kakao_coord2address_document(x: Any, y: Any) -> dict[str, Any] | None:
+    if x in (None, "") or y in (None, ""):
+        return None
+    payload = _kakao_get_json(
+        "/v2/local/geo/coord2address.json",
+        {"x": x, "y": y},
+    )
+    documents = payload.get("documents")
+    if isinstance(documents, list) and documents:
+        first = documents[0]
+        return first if isinstance(first, dict) else None
+    return None
+
+
+def _kakao_b_code_for_coord(x: Any, y: Any) -> str:
+    if x in (None, "") or y in (None, ""):
+        return ""
+    payload = _kakao_get_json(
+        "/v2/local/geo/coord2regioncode.json",
+        {"x": x, "y": y},
+    )
+    documents = payload.get("documents")
+    if not isinstance(documents, list):
+        return ""
+    for item in documents:
+        if not isinstance(item, dict):
+            continue
+        if item.get("region_type") == "B":
+            return _digits_only(item.get("code"))
+    return ""
+
+
+def _attach_kakao_b_code(doc: dict[str, Any], x: Any, y: Any) -> dict[str, Any]:
+    address = doc.get("address")
+    if not isinstance(address, dict):
+        return doc
+    if _digits_only(address.get("b_code")):
+        return doc
+    b_code = _kakao_b_code_for_coord(x, y)
+    if b_code:
+        address = dict(address)
+        address["b_code"] = b_code
+        doc["address"] = address
+    return doc
+
+
+def _normalize_kakao_keyword_doc(doc: Any) -> dict[str, Any] | None:
+    if not isinstance(doc, dict):
+        return None
+    item = dict(doc)
+    try:
+        resolved = _kakao_coord2address_document(item.get("x"), item.get("y"))
+    except Exception as exc:
+        logger.warning("failed to enrich kakao keyword address: %s", exc)
+        resolved = None
+
+    if isinstance(resolved, dict):
+        resolved = _attach_kakao_b_code(resolved, item.get("x"), item.get("y"))
+        if isinstance(resolved.get("address"), dict):
+            item["address"] = resolved["address"]
+        if isinstance(resolved.get("road_address"), dict):
+            item["road_address"] = resolved["road_address"]
+
+    if not item.get("address_name"):
+        item["address_name"] = item.get("road_address_name") or item.get("place_name") or ""
+    item["source"] = "kakao_keyword"
+    return _normalize_kakao_address_doc(item)
+
+
 @app.get("/v1/addr/search")
 def addr_search(
     query: str = Query(...),
     page: int = Query(1),
     page_size: int = Query(10),
 ) -> Dict[str, Any]:
-    return ok({"query": query, "page": page, "page_size": page_size, "documents": []})
+    safe_query = str(query or "").strip()
+    safe_page = max(1, int(page or 1))
+    safe_page_size = max(1, min(15, int(page_size or 10)))
+    if not safe_query:
+        return ok({"query": safe_query, "page": safe_page, "page_size": safe_page_size, "documents": []})
+
+    try:
+        payload = _kakao_get_json(
+            "/v2/local/search/address.json",
+            {
+                "query": safe_query,
+                "page": safe_page,
+                "size": safe_page_size,
+                "analyze_type": "exact",
+            },
+        )
+        raw_documents = payload.get("documents") if isinstance(payload.get("documents"), list) else []
+        documents = [
+            item
+            for item in (_normalize_kakao_address_doc(doc) for doc in raw_documents)
+            if item is not None
+        ]
+        using_keyword = False
+
+        if not documents:
+            keyword_payload = _kakao_get_json(
+                "/v2/local/search/keyword.json",
+                {
+                    "query": safe_query,
+                    "page": safe_page,
+                    "size": safe_page_size,
+                },
+            )
+            raw_documents = (
+                keyword_payload.get("documents") if isinstance(keyword_payload.get("documents"), list) else []
+            )
+            documents = [
+                item
+                for item in (_normalize_kakao_keyword_doc(doc) for doc in raw_documents)
+                if item is not None
+            ]
+            payload = keyword_payload
+            using_keyword = True
+
+        return ok(
+            {
+                "query": safe_query,
+                "page": safe_page,
+                "page_size": safe_page_size,
+                "provider": "kakao",
+                "mode": "keyword" if using_keyword else "address",
+                "meta": payload.get("meta", {}),
+                "documents": documents,
+            }
+        )
+    except Exception as exc:
+        logger.warning("address search failed: %s", exc)
+        return ok(
+            {
+                "query": safe_query,
+                "page": safe_page,
+                "page_size": safe_page_size,
+                "provider": "kakao",
+                "documents": [],
+                "error_message": str(exc)[:240],
+            }
+        )
 
 
 @app.get("/v1/addr/coord2address")
 def coord2address(x: float = Query(...), y: float = Query(...)) -> Dict[str, Any]:
-    return ok({"x": x, "y": y, "documents": []})
+    try:
+        payload = _kakao_get_json("/v2/local/geo/coord2address.json", {"x": x, "y": y})
+        documents = [
+            item
+            for item in (
+                _normalize_kakao_address_doc(_attach_kakao_b_code(doc, x, y) if isinstance(doc, dict) else doc)
+                for doc in payload.get("documents", [])
+            )
+            if item is not None
+        ]
+        return ok({"x": x, "y": y, "provider": "kakao", "meta": payload.get("meta", {}), "documents": documents})
+    except Exception as exc:
+        logger.warning("coord2address failed: %s", exc)
+        return ok({"x": x, "y": y, "provider": "kakao", "documents": [], "error_message": str(exc)[:240]})
 
 
 @app.get("/v1/addr/coord2region")
 def coord2region(x: float = Query(...), y: float = Query(...)) -> Dict[str, Any]:
-    return ok({"x": x, "y": y, "documents": []})
+    try:
+        payload = _kakao_get_json("/v2/local/geo/coord2regioncode.json", {"x": x, "y": y})
+        return ok(
+            {
+                "x": x,
+                "y": y,
+                "provider": "kakao",
+                "meta": payload.get("meta", {}),
+                "documents": payload.get("documents", []),
+            }
+        )
+    except Exception as exc:
+        logger.warning("coord2region failed: %s", exc)
+        return ok({"x": x, "y": y, "provider": "kakao", "documents": [], "error_message": str(exc)[:240]})
 
 
 @app.get("/v1/addr/position")
@@ -6538,4 +9657,17 @@ def position(lng: float = Query(...), lat: float = Query(...)) -> Dict[str, Any]
 
 @app.get("/v1/addr/geocode")
 def geocode(address: str = Query(...), epsg: str = Query("EPSG:4326")) -> Dict[str, Any]:
-    return ok({"address": address, "epsg": epsg, "results": []})
+    result = addr_search(query=address, page=1, page_size=1)
+    documents = result.get("data", {}).get("documents", []) if isinstance(result, dict) else []
+    results = [
+        {
+            "address": item.get("address_name"),
+            "road_address": item.get("road_address_name"),
+            "pnu": item.get("pnu"),
+            "x": item.get("x"),
+            "y": item.get("y"),
+        }
+        for item in documents
+        if isinstance(item, dict)
+    ]
+    return ok({"address": address, "epsg": epsg, "provider": "kakao", "results": results})

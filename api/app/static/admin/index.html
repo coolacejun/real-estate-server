@@ -57,7 +57,7 @@
     .card {
       background: var(--card);
       border: 1px solid var(--line);
-      border-radius: 12px;
+      border-radius: 8px;
       box-shadow: var(--shadow);
       padding: 14px;
     }
@@ -210,7 +210,7 @@
 
     .summary-box {
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 8px;
       padding: 10px;
       background: #fff;
       min-height: 74px;
@@ -233,9 +233,123 @@
       margin-top: 8px;
       border: 1px dashed #9dc2f4;
       background: #f0f7ff;
-      border-radius: 10px;
+      border-radius: 8px;
       padding: 10px;
       font-size: 13px;
+    }
+
+    .automation-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .automation-panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .automation-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+      background: #fafcff;
+    }
+
+    .automation-title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 800;
+    }
+
+    .automation-subtitle {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .automation-body {
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .metric-label {
+      margin: 0 0 3px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .metric-value {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+      word-break: break-word;
+    }
+
+    .progress {
+      height: 7px;
+      border-radius: 999px;
+      background: #e6edf6;
+      overflow: hidden;
+    }
+
+    .progress > span {
+      display: block;
+      width: 0%;
+      height: 100%;
+      background: var(--accent);
+      transition: width 180ms ease;
+    }
+
+    .direct-progress {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfdff;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .direct-progress-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .direct-progress-title {
+      margin: 0;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .direct-progress-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .direct-progress-item {
+      min-width: 0;
+    }
+
+    .compact-table {
+      max-height: 220px;
     }
 
     table {
@@ -264,7 +378,7 @@
       max-height: 360px;
       overflow: auto;
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 8px;
     }
 
     .log {
@@ -288,6 +402,8 @@
     @media (max-width: 1200px) {
       .guide { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .automation-grid { grid-template-columns: 1fr; }
+      .direct-progress-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .span-8, .span-6, .span-4, .span-12 { grid-column: span 12; }
       .w-420, .w-300 { min-width: 200px !important; }
     }
@@ -296,7 +412,7 @@
 <body>
 <div class="wrap">
   <h1>지적 데이터 관리자</h1>
-  <div class="subtitle">서버 경로 적재 전용: 전체 업로드 / 업데이트(추가·수정·삭제 컬럼) 모드 지원</div>
+  <div class="subtitle">자동화/워커 사이클 상태, 최근 적재 결과, 활성 데이터 버전 확인</div>
 
   <div class="grid">
     <section class="card span-12">
@@ -446,31 +562,266 @@
     </section>
 
     <section class="card span-12">
-      <h2>유형별 적재 실행 (서버 경로 전용)</h2>
-      <div class="row">
-        <select id="simpleUploadDataType">
-          <option value="cadastral">연속지적</option>
-          <option value="building_info">건축물정보</option>
-          <option value="building_integrated_info">건물통합정보</option>
-          <option value="land_info">토지정보</option>
-        </select>
-        <select id="operationMode">
-          <option value="full">전체 업로드</option>
-          <option value="update">업데이트 (추가/수정/삭제)</option>
-        </select>
+      <div class="row" style="justify-content:space-between;">
+        <h2 style="margin:0;">자동화 / 워커 업데이트 현황</h2>
+        <button id="refreshAutomationStatus" class="ghost">상태 새로고침</button>
       </div>
-      <div class="row">
-        <input id="simpleUploadVersion" placeholder="version (전체 업로드: 신규 release 버전, 업데이트: 활성 release 사용)" />
-        <input id="simpleUploadSourceName" class="w-300" placeholder="source_name (선택)" />
+
+      <div class="automation-grid" style="margin-top:10px;">
+        <article class="automation-panel">
+          <div class="automation-head">
+            <div>
+              <p class="automation-title">건축물정보</p>
+              <div class="automation-subtitle mono">building_info</div>
+            </div>
+            <p id="buildingHubSyncStatus" class="metric-value mono">-</p>
+          </div>
+          <div class="automation-body">
+            <div class="progress"><span id="buildingHubSyncProgressBar"></span></div>
+            <div class="metric-grid">
+              <div class="metric">
+                <p class="metric-label">활성 Release</p>
+                <p id="buildingHubSyncRelease" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">데이터 기준월</p>
+                <p id="buildingHubSyncDataMonth" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">다음 확인</p>
+                <p id="buildingHubSyncNextCheck" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 Job</p>
+                <p id="buildingHubSyncJob" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 실행</p>
+                <p id="buildingHubSyncLastRun" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">검증</p>
+                <p id="buildingHubSyncVerification" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">정리</p>
+                <p id="buildingHubSyncCleanup" class="metric-value mono">-</p>
+              </div>
+            </div>
+            <div class="table-wrap compact-table">
+              <table>
+                <thead>
+                <tr>
+                  <th>구분</th>
+                  <th>기준월</th>
+                  <th>Status</th>
+                  <th>Size</th>
+                </tr>
+                </thead>
+                <tbody id="buildingHubFileRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+
+        <article class="automation-panel">
+          <div class="automation-head">
+            <div>
+              <p class="automation-title">연속지적</p>
+              <div class="automation-subtitle mono">cadastral / CH_D002</div>
+            </div>
+            <p id="cadastralSyncStatus" class="metric-value mono">-</p>
+          </div>
+          <div class="automation-body">
+            <div class="progress"><span id="cadastralSyncProgressBar"></span></div>
+            <div class="metric-grid">
+              <div class="metric">
+                <p class="metric-label">활성 Release</p>
+                <p id="cadastralSyncRelease" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 반영 기준</p>
+                <p id="cadastralSyncLowerBound" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">다음 확인</p>
+                <p id="cadastralSyncNextCheck" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 Job</p>
+                <p id="cadastralSyncJob" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 실행</p>
+                <p id="cadastralSyncLastRun" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">검증</p>
+                <p id="cadastralSyncVerification" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">작업 파일</p>
+                <p id="cadastralSyncWork" class="metric-value mono">-</p>
+              </div>
+            </div>
+            <div class="table-wrap compact-table">
+              <table>
+                <thead>
+                <tr>
+                  <th>단계</th>
+                  <th>파일</th>
+                  <th>시각</th>
+                  <th>Status</th>
+                </tr>
+                </thead>
+                <tbody id="cadastralSyncFileRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+
+        <article class="automation-panel">
+          <div class="automation-head">
+            <div>
+              <p class="automation-title">건물통합정보</p>
+              <div class="automation-subtitle mono">building_integrated_info / CH_D010</div>
+            </div>
+            <p id="buildingIntegratedSyncStatus" class="metric-value mono">-</p>
+          </div>
+          <div class="automation-body">
+            <div class="progress"><span id="buildingIntegratedSyncProgressBar"></span></div>
+            <div class="metric-grid">
+              <div class="metric">
+                <p class="metric-label">활성 Release</p>
+                <p id="buildingIntegratedSyncRelease" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 반영 기준</p>
+                <p id="buildingIntegratedSyncLowerBound" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">다음 확인</p>
+                <p id="buildingIntegratedSyncNextCheck" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 Job</p>
+                <p id="buildingIntegratedSyncJob" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 실행</p>
+                <p id="buildingIntegratedSyncLastRun" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">검증</p>
+                <p id="buildingIntegratedSyncVerification" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">작업 파일</p>
+                <p id="buildingIntegratedSyncWork" class="metric-value mono">-</p>
+              </div>
+            </div>
+            <div class="table-wrap compact-table">
+              <table>
+                <thead>
+                <tr>
+                  <th>단계</th>
+                  <th>파일</th>
+                  <th>시각</th>
+                  <th>Status</th>
+                </tr>
+                </thead>
+                <tbody id="buildingIntegratedSyncFileRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+
+        <article class="automation-panel">
+          <div class="automation-head">
+            <div>
+              <p class="automation-title">토지정보</p>
+              <div class="automation-subtitle mono">worker direct upload / AL_D155,D157,D161,D195</div>
+            </div>
+            <p id="landInfoSyncStatus" class="metric-value mono">-</p>
+          </div>
+          <div class="automation-body">
+            <div class="progress"><span id="landInfoSyncProgressBar"></span></div>
+            <div class="direct-progress">
+              <div class="direct-progress-head">
+                <p class="direct-progress-title">윈도우 워커 업로드</p>
+                <span id="landInfoDirectStatus" class="status">-</span>
+              </div>
+              <div class="progress"><span id="landInfoDirectProgressBar"></span></div>
+              <div class="direct-progress-grid">
+                <div class="direct-progress-item">
+                  <p class="metric-label">파일 진행</p>
+                  <p id="landInfoDirectFileProgress" class="metric-value mono">-</p>
+                </div>
+                <div class="direct-progress-item">
+                  <p class="metric-label">수신 용량</p>
+                  <p id="landInfoDirectBytes" class="metric-value mono">-</p>
+                </div>
+                <div class="direct-progress-item">
+                  <p class="metric-label">현재 파일</p>
+                  <p id="landInfoDirectCurrentFile" class="metric-value mono">-</p>
+                </div>
+                <div class="direct-progress-item">
+                  <p class="metric-label">워커 상태</p>
+                  <p id="landInfoDirectWorker" class="metric-value mono">-</p>
+                </div>
+              </div>
+              <div id="landInfoDirectDetail" class="muted mono">-</div>
+            </div>
+            <div class="metric-grid">
+              <div class="metric">
+                <p class="metric-label">활성 Release</p>
+                <p id="landInfoSyncRelease" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">유형별 Release</p>
+                <p id="landInfoSyncComponents" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최신 기준</p>
+                <p id="landInfoSyncSnapshot" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">워커 확인</p>
+                <p id="landInfoSyncNextCheck" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 Job</p>
+                <p id="landInfoSyncJob" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">최근 실행</p>
+                <p id="landInfoSyncLastRun" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">검증</p>
+                <p id="landInfoSyncVerification" class="metric-value mono">-</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">업로드 상태</p>
+                <p id="landInfoSyncWork" class="metric-value mono">-</p>
+              </div>
+            </div>
+            <div class="table-wrap compact-table">
+              <table>
+                <thead>
+                <tr>
+                  <th>단계</th>
+                  <th>파일</th>
+                  <th>시각</th>
+                  <th>Status</th>
+                </tr>
+                </thead>
+                <tbody id="landInfoSyncFileRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </article>
       </div>
-      <div class="row">
-        <button id="serverImportRun" class="primary">적재 시작</button>
-      </div>
-      <div class="inline-help">서버 경로는 데이터 유형/모드 기준으로 자동 지정됩니다.</div>
-      <div class="inline-help">자동 경로: <span id="autoSourcePath" class="mono">-</span></div>
-      <div class="inline-help">전체 업로드는 새 데이터 적재 완료 후 이전 데이터를 자동 정리합니다.</div>
-      <div id="uiLockNotice" class="inline-help" style="display:none; color: var(--danger); margin-top:6px;"></div>
-      <div class="inline-help">업데이트 모드에서는 입력 데이터의 추가/수정/삭제 컬럼을 기준으로 변경분만 반영됩니다.</div>
     </section>
 
     <section class="card span-12">
@@ -658,6 +1009,10 @@
     jobs: [],
     jobWorkers: [],
     updateFiles: [],
+    buildingHubSync: null,
+    cadastralSync: null,
+    buildingIntegratedSync: null,
+    landInfoSync: null,
     monitorTimer: null,
     monitorBusy: false,
     lastMonitorErrorAt: 0,
@@ -702,6 +1057,56 @@
     updateResultRows: document.getElementById('updateResultRows'),
     updateFileRows: document.getElementById('updateFileRows'),
     refreshUpdateFilesBtn: document.getElementById('refreshUpdateFiles'),
+    refreshAutomationStatusBtn: document.getElementById('refreshAutomationStatus'),
+
+    buildingHubSyncStatus: document.getElementById('buildingHubSyncStatus'),
+    buildingHubSyncRelease: document.getElementById('buildingHubSyncRelease'),
+    buildingHubSyncDataMonth: document.getElementById('buildingHubSyncDataMonth'),
+    buildingHubSyncNextCheck: document.getElementById('buildingHubSyncNextCheck'),
+    buildingHubSyncLastRun: document.getElementById('buildingHubSyncLastRun'),
+    buildingHubSyncVerification: document.getElementById('buildingHubSyncVerification'),
+    buildingHubSyncCleanup: document.getElementById('buildingHubSyncCleanup'),
+    buildingHubSyncJob: document.getElementById('buildingHubSyncJob'),
+    buildingHubSyncProgressBar: document.getElementById('buildingHubSyncProgressBar'),
+    buildingHubFileRows: document.getElementById('buildingHubFileRows'),
+    cadastralSyncStatus: document.getElementById('cadastralSyncStatus'),
+    cadastralSyncRelease: document.getElementById('cadastralSyncRelease'),
+    cadastralSyncLowerBound: document.getElementById('cadastralSyncLowerBound'),
+    cadastralSyncNextCheck: document.getElementById('cadastralSyncNextCheck'),
+    cadastralSyncLastRun: document.getElementById('cadastralSyncLastRun'),
+    cadastralSyncJob: document.getElementById('cadastralSyncJob'),
+    cadastralSyncWork: document.getElementById('cadastralSyncWork'),
+    cadastralSyncVerification: document.getElementById('cadastralSyncVerification'),
+    cadastralSyncProgressBar: document.getElementById('cadastralSyncProgressBar'),
+    cadastralSyncFileRows: document.getElementById('cadastralSyncFileRows'),
+    buildingIntegratedSyncStatus: document.getElementById('buildingIntegratedSyncStatus'),
+    buildingIntegratedSyncRelease: document.getElementById('buildingIntegratedSyncRelease'),
+    buildingIntegratedSyncLowerBound: document.getElementById('buildingIntegratedSyncLowerBound'),
+    buildingIntegratedSyncNextCheck: document.getElementById('buildingIntegratedSyncNextCheck'),
+    buildingIntegratedSyncLastRun: document.getElementById('buildingIntegratedSyncLastRun'),
+    buildingIntegratedSyncJob: document.getElementById('buildingIntegratedSyncJob'),
+    buildingIntegratedSyncWork: document.getElementById('buildingIntegratedSyncWork'),
+    buildingIntegratedSyncVerification: document.getElementById('buildingIntegratedSyncVerification'),
+    buildingIntegratedSyncProgressBar: document.getElementById('buildingIntegratedSyncProgressBar'),
+    buildingIntegratedSyncFileRows: document.getElementById('buildingIntegratedSyncFileRows'),
+    landInfoSyncStatus: document.getElementById('landInfoSyncStatus'),
+    landInfoSyncRelease: document.getElementById('landInfoSyncRelease'),
+    landInfoSyncComponents: document.getElementById('landInfoSyncComponents'),
+    landInfoSyncSnapshot: document.getElementById('landInfoSyncSnapshot'),
+    landInfoSyncNextCheck: document.getElementById('landInfoSyncNextCheck'),
+    landInfoSyncLastRun: document.getElementById('landInfoSyncLastRun'),
+    landInfoSyncJob: document.getElementById('landInfoSyncJob'),
+    landInfoSyncWork: document.getElementById('landInfoSyncWork'),
+    landInfoSyncVerification: document.getElementById('landInfoSyncVerification'),
+    landInfoSyncProgressBar: document.getElementById('landInfoSyncProgressBar'),
+    landInfoSyncFileRows: document.getElementById('landInfoSyncFileRows'),
+    landInfoDirectStatus: document.getElementById('landInfoDirectStatus'),
+    landInfoDirectProgressBar: document.getElementById('landInfoDirectProgressBar'),
+    landInfoDirectFileProgress: document.getElementById('landInfoDirectFileProgress'),
+    landInfoDirectBytes: document.getElementById('landInfoDirectBytes'),
+    landInfoDirectCurrentFile: document.getElementById('landInfoDirectCurrentFile'),
+    landInfoDirectWorker: document.getElementById('landInfoDirectWorker'),
+    landInfoDirectDetail: document.getElementById('landInfoDirectDetail'),
 
     refreshStorageBtn: document.getElementById('refreshStorage'),
     storageDbSize: document.getElementById('storageDbSize'),
@@ -726,17 +1131,10 @@
     appCfgIosUpdatedAt: document.getElementById('appCfgIosUpdatedAt'),
     saveAppCfgIosBtn: document.getElementById('saveAppCfgIos'),
 
-    simpleUploadDataType: document.getElementById('simpleUploadDataType'),
-    operationMode: document.getElementById('operationMode'),
-    simpleUploadVersion: document.getElementById('simpleUploadVersion'),
-    simpleUploadSourceName: document.getElementById('simpleUploadSourceName'),
-    autoSourcePath: document.getElementById('autoSourcePath'),
-    serverImportRun: document.getElementById('serverImportRun'),
     clearDataTypeButtons: Array.from(document.querySelectorAll('button[data-action="clear-data-type"]')),
     refreshReleasesBtn: document.getElementById('refreshReleases'),
     refreshJobsBtn: document.getElementById('refreshJobs'),
     refreshWorkersBtn: document.getElementById('refreshWorkers'),
-    uiLockNotice: document.getElementById('uiLockNotice'),
   };
 
   function dataTypeLabel(dataType) {
@@ -750,42 +1148,6 @@
       case 'cadastral':
       default:
         return '연속지적';
-    }
-  }
-
-  function defaultServerPathByType(dataType, operationMode = 'full') {
-    const mode = (operationMode || 'full').trim().toLowerCase() === 'update' ? 'update' : 'full';
-    switch ((dataType || '').trim().toLowerCase()) {
-      case 'building_info':
-        return `/data/source/building_info/${mode}`;
-      case 'building_integrated_info':
-        return `/data/source/building_integrated_info/${mode}`;
-      case 'land_info':
-        return `/data/source/land_info/${mode}`;
-      case 'cadastral':
-      default:
-        return `/data/uploads/연속지적/${mode}`;
-    }
-  }
-
-  function currentAutoSourcePath() {
-    const dataType = (el.simpleUploadDataType && el.simpleUploadDataType.value
-      ? el.simpleUploadDataType.value
-      : 'cadastral')
-      .trim()
-      .toLowerCase()
-      .replace(/-/g, '_');
-    const operationMode = (el.operationMode && el.operationMode.value
-      ? el.operationMode.value
-      : 'full')
-      .trim()
-      .toLowerCase() === 'update' ? 'update' : 'full';
-    return defaultServerPathByType(dataType, operationMode);
-  }
-
-  function updateAutoSourcePathUi() {
-    if (el.autoSourcePath) {
-      el.autoSourcePath.textContent = currentAutoSourcePath();
     }
   }
 
@@ -879,10 +1241,34 @@
   }
 
   function statusClass(status, isActive = false) {
-    if (isActive || status === 'ACTIVE' || status === 'SUCCEEDED') return 'status active';
-    if (status === 'RUNNING' || status === 'IMPORTING') return 'status running';
-    if (status === 'FAILED') return 'status failed';
+    const normalized = String(status || '').toUpperCase();
+    if (isActive || ['ACTIVE', 'SUCCEEDED', 'SLEEPING', 'WAITING', 'ACCEPTED', 'PROCESSED', 'SERVER_PROCESSED'].includes(normalized)) return 'status active';
+    if (['RUNNING', 'IMPORTING', 'PREPARING', 'CLAIMED', 'IN_PROGRESS', 'UPLOADING', 'REQUESTED', 'SERVER_PROCESSING'].includes(normalized) || normalized.startsWith('CHECKING')) return 'status running';
+    if (normalized === 'FAILED' || normalized === 'ERROR' || normalized === 'SERVER_FAILED' || normalized === 'COMPLETED_WITH_FAILURES') return 'status failed';
     return 'status';
+  }
+
+  function setProgressValue(node, value, status = '') {
+    if (!node) return;
+    const pct = Number(value);
+    const normalized = String(status || '').toUpperCase();
+    const safePct = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+    node.style.width = `${safePct}%`;
+    node.style.background = statusClass(normalized).includes('failed') ? 'var(--danger)' : 'var(--accent)';
+  }
+
+  function setProgressBar(node, job) {
+    if (!node) return;
+    const total = Number(job && job.total_files);
+    const processed = Number(job && job.processed_files);
+    const status = String((job && job.status) || '').toUpperCase();
+    let value = 0;
+    if (Number.isFinite(total) && total > 0) {
+      value = Math.max(0, Math.min(100, (Number.isFinite(processed) ? processed : 0) / total * 100));
+    } else if (status === 'SUCCEEDED') {
+      value = 100;
+    }
+    setProgressValue(node, value, status);
   }
 
   function rowFromHtml(html) {
@@ -1226,6 +1612,633 @@
     patchTableRows(el.updateFileRows, rows, updateFileRowKey, updateFileRowHtml);
   }
 
+  function setBuildingHubText(node, value) {
+    if (!node) return;
+    node.textContent = value == null || value === '' ? '-' : String(value);
+  }
+
+  function setBuildingHubStatus(node, status, fallback = '-') {
+    if (!node) return;
+    const text = status == null || status === '' ? fallback : String(status);
+    if (!text || text === '-') {
+      node.textContent = '-';
+      return;
+    }
+    node.innerHTML = `<span class="${statusClass(text)}">${escapeHtml(text)}</span>`;
+  }
+
+  function buildingHubFileRows() {
+    const data = state.buildingHubSync || {};
+    const latestFetch = data.latest_fetch && typeof data.latest_fetch === 'object'
+      ? data.latest_fetch
+      : {};
+    const latestRun = data.latest_run && typeof data.latest_run === 'object'
+      ? data.latest_run
+      : {};
+    const fetchItems = Array.isArray(latestFetch.items) ? latestFetch.items : [];
+    if (fetchItems.length > 0) return fetchItems;
+    const runLatest = latestRun.latest && typeof latestRun.latest === 'object'
+      ? latestRun.latest
+      : {};
+    return Array.isArray(runLatest.items) ? runLatest.items : [];
+  }
+
+  function renderBuildingHubFileRows() {
+    if (!el.buildingHubFileRows) return;
+    const rows = buildingHubFileRows();
+    if (rows.length < 1) {
+      el.buildingHubFileRows.innerHTML = `
+        <tr>
+          <td colspan="4" class="muted">탐지된 건축HUB 파일 목록이 없습니다.</td>
+        </tr>
+      `;
+      return;
+    }
+    el.buildingHubFileRows.innerHTML = rows.map((item) => {
+      const status = String(item.status || '-');
+      return `
+        <tr>
+          <td>
+            ${escapeHtml(item.task_name || item.expected_filename || item.task_code || '-')}
+            <div class="muted mono">${escapeHtml(item.file_id || '-')}</div>
+          </td>
+          <td class="mono">${escapeHtml(item.month || '-')}</td>
+          <td><span class="${statusClass(status)}">${escapeHtml(status)}</span></td>
+          <td class="mono">${escapeHtml(formatBytes(item.content_length))}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function renderBuildingHubSyncStatus() {
+    const data = state.buildingHubSync || {};
+    const scheduler = data.scheduler && typeof data.scheduler === 'object' ? data.scheduler : {};
+    const activeRelease = data.active_release && typeof data.active_release === 'object' ? data.active_release : {};
+    const latestRun = data.latest_run && typeof data.latest_run === 'object' ? data.latest_run : {};
+    const verification = latestRun.verification && typeof latestRun.verification === 'object'
+      ? latestRun.verification
+      : {};
+    const cleanup = latestRun.cleanup && typeof latestRun.cleanup === 'object' ? latestRun.cleanup : {};
+    const latestJob = data.latest_job && typeof data.latest_job === 'object' ? data.latest_job : {};
+
+    const schedulerStatus = String(scheduler.status || '');
+    const schedulerReason = scheduler.reason ? ` (${scheduler.reason})` : '';
+    if (schedulerStatus) {
+      if (el.buildingHubSyncStatus) {
+        el.buildingHubSyncStatus.innerHTML =
+          `<span class="${statusClass(schedulerStatus)}">${escapeHtml(schedulerStatus)}</span>${escapeHtml(schedulerReason)}`;
+      }
+    } else {
+      setBuildingHubText(el.buildingHubSyncStatus, '-');
+    }
+
+    const releaseText = activeRelease.id
+      ? `${activeRelease.id} (${activeRelease.version || '-'}) / ${Number(activeRelease.records_count || 0).toLocaleString()} rows`
+      : '-';
+    setBuildingHubText(el.buildingHubSyncRelease, releaseText);
+    setBuildingHubText(el.buildingHubSyncDataMonth, data.active_data_month || '-');
+    setBuildingHubText(
+      el.buildingHubSyncNextCheck,
+      formatIsoToLocale(scheduler.next_check_at || data.next_expected_upload_at)
+    );
+
+    const runText = latestRun.status
+      ? `${latestRun.status} / ${formatIsoToLocale(latestRun.finished_at || latestRun.started_at)}`
+      : '-';
+    setBuildingHubText(el.buildingHubSyncLastRun, runText);
+
+    const verificationText = verification.status
+      ? `${verification.status} (${verification.mode || '-'})`
+      : '-';
+    setBuildingHubStatus(el.buildingHubSyncVerification, verification.status, verificationText);
+    if (verification.status && el.buildingHubSyncVerification) {
+      el.buildingHubSyncVerification.innerHTML += ` <span class="muted">(${escapeHtml(verification.mode || '-')})</span>`;
+    }
+
+    const cleanupText = cleanup.deleted_releases != null
+      ? `${cleanup.deleted_releases}개 삭제`
+      : '-';
+    setBuildingHubText(el.buildingHubSyncCleanup, cleanupText);
+
+    const jobText = latestJob.id
+      ? `${latestJob.id} (${latestJob.status || '-'}) / ${Number(latestJob.inserted_rows || 0).toLocaleString()} rows`
+      : '-';
+    setBuildingHubText(el.buildingHubSyncJob, jobText);
+    setProgressBar(el.buildingHubSyncProgressBar, latestJob);
+    renderBuildingHubFileRows();
+  }
+
+  function cadastralSyncFileRows() {
+    const data = state.cadastralSync || {};
+    const localWork = data.local_work && typeof data.local_work === 'object' ? data.local_work : {};
+    const rawItems = localWork.raw && Array.isArray(localWork.raw.items) ? localWork.raw.items : [];
+    const stagingItems = localWork.staging && Array.isArray(localWork.staging.items) ? localWork.staging.items : [];
+    const updateItems = Array.isArray(data.recent_update_files) ? data.recent_update_files : [];
+    const rows = [];
+    stagingItems.slice(0, 5).forEach((item) => rows.push({
+      stage: item.parent || 'staging',
+      file: item.name,
+      size: item.size,
+      at: item.modified_at,
+      status: 'CONVERTED',
+    }));
+    rawItems.slice(0, 5).forEach((item) => rows.push({
+      stage: 'raw',
+      file: item.name,
+      size: item.size,
+      at: item.modified_at,
+      status: 'DOWNLOADED',
+    }));
+    updateItems.slice(0, 5).forEach((item) => rows.push({
+      stage: 'imported',
+      file: item.file_name,
+      size: item.file_size,
+      at: item.created_at,
+      status: item.release_status || 'RECORDED',
+    }));
+    return rows.slice(0, 12);
+  }
+
+  function renderCadastralSyncFileRows() {
+    if (!el.cadastralSyncFileRows) return;
+    const rows = cadastralSyncFileRows();
+    if (rows.length < 1) {
+      el.cadastralSyncFileRows.innerHTML = `
+        <tr>
+          <td colspan="4" class="muted">연속지적 자동화 파일 이력이 없습니다.</td>
+        </tr>
+      `;
+      return;
+    }
+    el.cadastralSyncFileRows.innerHTML = rows.map((item) => `
+      <tr>
+        <td>${escapeHtml(item.stage || '-')}</td>
+        <td class="mono">${escapeHtml(item.file || '-')}<div class="muted mono">${escapeHtml(formatBytes(item.size))}</div></td>
+        <td>${escapeHtml(formatIsoToLocale(item.at))}</td>
+        <td><span class="${statusClass(item.status)}">${escapeHtml(item.status || '-')}</span></td>
+      </tr>
+    `).join('');
+  }
+
+  function renderCadastralSyncStatus() {
+    const data = state.cadastralSync || {};
+    const scheduler = data.scheduler && typeof data.scheduler === 'object' ? data.scheduler : {};
+    const activeRelease = data.active_release && typeof data.active_release === 'object' ? data.active_release : {};
+    const latestRun = data.latest_run && typeof data.latest_run === 'object' ? data.latest_run : {};
+    const verification = latestRun.verification && typeof latestRun.verification === 'object'
+      ? latestRun.verification
+      : {};
+    const latestJob = data.latest_job && typeof data.latest_job === 'object' ? data.latest_job : {};
+    const localWork = data.local_work && typeof data.local_work === 'object' ? data.local_work : {};
+    const config = data.config && typeof data.config === 'object' ? data.config : {};
+
+    const schedulerStatus = String(scheduler.status || '');
+    const schedulerReason = scheduler.reason ? ` (${scheduler.reason})` : '';
+    if (schedulerStatus && el.cadastralSyncStatus) {
+      el.cadastralSyncStatus.innerHTML =
+        `<span class="${statusClass(schedulerStatus)}">${escapeHtml(schedulerStatus)}</span>${escapeHtml(schedulerReason)}`;
+    } else {
+      setBuildingHubText(el.cadastralSyncStatus, '-');
+    }
+
+    const releaseText = activeRelease.id
+      ? `${activeRelease.id} (${activeRelease.version || '-'}) / ${Number(activeRelease.records_count || 0).toLocaleString()} rows`
+      : '-';
+    setBuildingHubText(el.cadastralSyncRelease, releaseText);
+
+    const lowerBound = latestRun.lower_bound || (verification.release_version ? `release ${verification.release_version}` : '-');
+    const missingText = latestRun.missing_count != null
+      ? `${lowerBound} / missing ${Number(latestRun.missing_count || 0).toLocaleString()}`
+      : lowerBound;
+    setBuildingHubText(el.cadastralSyncLowerBound, missingText);
+    setBuildingHubText(el.cadastralSyncNextCheck, formatIsoToLocale(scheduler.next_check_at));
+
+    const runText = latestRun.status
+      ? `${latestRun.status} / ${formatIsoToLocale(latestRun.finished_at || latestRun.started_at)}`
+      : '-';
+    setBuildingHubText(el.cadastralSyncLastRun, runText);
+
+    const jobText = latestJob.id
+      ? `${latestJob.id} (${latestJob.status || '-'}) ${Number(latestJob.processed_files || 0).toLocaleString()}/${Number(latestJob.total_files || 0).toLocaleString()} files / ${Number(latestJob.inserted_rows || 0).toLocaleString()} rows`
+      : '-';
+    setBuildingHubText(el.cadastralSyncJob, jobText);
+
+    const rawCount = localWork.raw && localWork.raw.count != null ? Number(localWork.raw.count || 0) : 0;
+    const stagingCount = localWork.staging && localWork.staging.count != null ? Number(localWork.staging.count || 0) : 0;
+    const maxFiles = config.max_files === 0 ? 'all' : String(config.max_files ?? '-');
+    const workText = data.sync_dir
+      ? `${rawCount} zip / ${stagingCount} geojson / max ${maxFiles}`
+      : '-';
+    setBuildingHubText(el.cadastralSyncWork, workText);
+
+    const verificationText = verification.expected_count != null
+      ? `${Number(verification.recorded_count || 0).toLocaleString()}/${Number(verification.expected_count || 0).toLocaleString()} recorded`
+      : '-';
+    setBuildingHubText(el.cadastralSyncVerification, verificationText);
+    setProgressBar(el.cadastralSyncProgressBar, latestJob);
+    renderCadastralSyncFileRows();
+  }
+
+  function buildingIntegratedSyncFileRows() {
+    const data = state.buildingIntegratedSync || {};
+    const localWork = data.local_work && typeof data.local_work === 'object' ? data.local_work : {};
+    const rawItems = localWork.raw && Array.isArray(localWork.raw.items) ? localWork.raw.items : [];
+    const stagingItems = localWork.staging && Array.isArray(localWork.staging.items) ? localWork.staging.items : [];
+    const updateItems = Array.isArray(data.recent_update_files) ? data.recent_update_files : [];
+    const rows = [];
+    stagingItems.slice(0, 5).forEach((item) => rows.push({
+      stage: item.parent || 'staging',
+      file: item.name,
+      size: item.size,
+      at: item.modified_at,
+      status: 'CONVERTED',
+    }));
+    rawItems.slice(0, 5).forEach((item) => rows.push({
+      stage: 'raw',
+      file: item.name,
+      size: item.size,
+      at: item.modified_at,
+      status: 'DOWNLOADED',
+    }));
+    updateItems.slice(0, 5).forEach((item) => rows.push({
+      stage: 'imported',
+      file: item.file_name,
+      size: item.file_size,
+      at: item.created_at,
+      status: item.release_status || 'RECORDED',
+    }));
+    return rows.slice(0, 12);
+  }
+
+  function renderBuildingIntegratedSyncFileRows() {
+    if (!el.buildingIntegratedSyncFileRows) return;
+    const rows = buildingIntegratedSyncFileRows();
+    if (rows.length < 1) {
+      el.buildingIntegratedSyncFileRows.innerHTML = `
+        <tr>
+          <td colspan="4" class="muted">건물통합정보 자동화 파일 이력이 없습니다.</td>
+        </tr>
+      `;
+      return;
+    }
+    el.buildingIntegratedSyncFileRows.innerHTML = rows.map((item) => `
+      <tr>
+        <td>${escapeHtml(item.stage || '-')}</td>
+        <td class="mono">${escapeHtml(item.file || '-')}<div class="muted mono">${escapeHtml(formatBytes(item.size))}</div></td>
+        <td>${escapeHtml(formatIsoToLocale(item.at))}</td>
+        <td><span class="${statusClass(item.status)}">${escapeHtml(item.status || '-')}</span></td>
+      </tr>
+    `).join('');
+  }
+
+  function renderBuildingIntegratedSyncStatus() {
+    const data = state.buildingIntegratedSync || {};
+    const scheduler = data.scheduler && typeof data.scheduler === 'object' ? data.scheduler : {};
+    const activeRelease = data.active_release && typeof data.active_release === 'object' ? data.active_release : {};
+    const latestRun = data.latest_run && typeof data.latest_run === 'object' ? data.latest_run : {};
+    const verification = latestRun.verification && typeof latestRun.verification === 'object'
+      ? latestRun.verification
+      : {};
+    const latestJob = data.latest_job && typeof data.latest_job === 'object' ? data.latest_job : {};
+    const localWork = data.local_work && typeof data.local_work === 'object' ? data.local_work : {};
+    const config = data.config && typeof data.config === 'object' ? data.config : {};
+
+    const schedulerStatus = String(scheduler.status || '');
+    const schedulerReason = scheduler.reason ? ` (${scheduler.reason})` : '';
+    if (schedulerStatus && el.buildingIntegratedSyncStatus) {
+      el.buildingIntegratedSyncStatus.innerHTML =
+        `<span class="${statusClass(schedulerStatus)}">${escapeHtml(schedulerStatus)}</span>${escapeHtml(schedulerReason)}`;
+    } else {
+      setBuildingHubText(el.buildingIntegratedSyncStatus, '-');
+    }
+
+    const releaseText = activeRelease.id
+      ? `${activeRelease.id} (${activeRelease.version || '-'}) / ${Number(activeRelease.records_count || 0).toLocaleString()} rows`
+      : '-';
+    setBuildingHubText(el.buildingIntegratedSyncRelease, releaseText);
+
+    const lowerBound = latestRun.lower_bound || (verification.release_version ? `release ${verification.release_version}` : '-');
+    const missingText = latestRun.missing_count != null
+      ? `${lowerBound} / missing ${Number(latestRun.missing_count || 0).toLocaleString()}`
+      : lowerBound;
+    setBuildingHubText(el.buildingIntegratedSyncLowerBound, missingText);
+    setBuildingHubText(el.buildingIntegratedSyncNextCheck, formatIsoToLocale(scheduler.next_check_at));
+
+    const runText = latestRun.status
+      ? `${latestRun.status} / ${formatIsoToLocale(latestRun.finished_at || latestRun.started_at)}`
+      : '-';
+    setBuildingHubText(el.buildingIntegratedSyncLastRun, runText);
+
+    const jobText = latestJob.id
+      ? `${latestJob.id} (${latestJob.status || '-'}) ${Number(latestJob.processed_files || 0).toLocaleString()}/${Number(latestJob.total_files || 0).toLocaleString()} files / ${Number(latestJob.inserted_rows || 0).toLocaleString()} rows`
+      : '-';
+    setBuildingHubText(el.buildingIntegratedSyncJob, jobText);
+
+    const rawCount = localWork.raw && localWork.raw.count != null ? Number(localWork.raw.count || 0) : 0;
+    const stagingCount = localWork.staging && localWork.staging.count != null ? Number(localWork.staging.count || 0) : 0;
+    const maxFiles = config.max_files === 0 ? 'all' : String(config.max_files ?? '-');
+    const workText = data.sync_dir
+      ? `${rawCount} zip / ${stagingCount} geojson / max ${maxFiles}`
+      : '-';
+    setBuildingHubText(el.buildingIntegratedSyncWork, workText);
+
+    const verificationText = verification.expected_count != null
+      ? `${Number(verification.recorded_count || 0).toLocaleString()}/${Number(verification.expected_count || 0).toLocaleString()} recorded`
+      : '-';
+    setBuildingHubText(el.buildingIntegratedSyncVerification, verificationText);
+    setProgressBar(el.buildingIntegratedSyncProgressBar, latestJob);
+    renderBuildingIntegratedSyncFileRows();
+  }
+
+  function directStatusCounts(request) {
+    const rawCounts = request && request.file_status_counts && typeof request.file_status_counts === 'object'
+      ? request.file_status_counts
+      : {};
+    const counts = {};
+    Object.entries(rawCounts).forEach(([key, value]) => {
+      counts[String(key || '').toLowerCase()] = Number(value || 0);
+    });
+    return counts;
+  }
+
+  function pickLandInfoDirectRequest(directWorker) {
+    const requests = Array.isArray(directWorker && directWorker.recent_requests)
+      ? directWorker.recent_requests
+      : [];
+    if (requests.length < 1) return null;
+    const heartbeat = directWorker && directWorker.latest_heartbeat && typeof directWorker.latest_heartbeat === 'object'
+      ? directWorker.latest_heartbeat
+      : {};
+    const heartbeatRequestId = String(heartbeat.current_request_id || '');
+    if (heartbeatRequestId) {
+      const matched = requests.find((item) => String(item && item.request_id) === heartbeatRequestId);
+      if (matched) return matched;
+    }
+    const activeStatuses = new Set(['requested', 'pending', 'claimed', 'in_progress', 'server_processing']);
+    return requests.find((item) => activeStatuses.has(String(item && item.status || '').toLowerCase())) || requests[0];
+  }
+
+  function directRequestProgress(request) {
+    const counts = directStatusCounts(request);
+    const expected = Number(request && request.expected_count);
+    const accepted = Number(request && request.accepted_upload_count) || Number(counts.accepted || 0);
+    const failed = Number(request && request.failed_count) || Number(counts.failed || 0);
+    const uploading = Number(counts.uploading || 0);
+    const downloaded = Number(counts.downloaded || 0);
+    const downloadStarted = Number(counts.download_started || 0);
+    const processed = Number(counts.processed || 0);
+    const completed = accepted + failed + processed;
+    const known = Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
+    const waiting = Number.isFinite(expected) && expected > 0
+      ? Math.max(0, expected - accepted - failed - uploading - processed)
+      : Math.max(0, known - accepted - failed - uploading - processed);
+    let percent = Number(request && request.progress_percent);
+    const status = String(request && request.status || '').toLowerCase();
+    if (!Number.isFinite(percent)) {
+      if (Number.isFinite(expected) && expected > 0) {
+        percent = Math.max(0, Math.min(100, completed / expected * 100));
+      } else if (status === 'server_processed') {
+        percent = 100;
+      } else {
+        percent = 0;
+      }
+    }
+    return {
+      expected: Number.isFinite(expected) ? expected : 0,
+      accepted,
+      failed,
+      uploading,
+      downloaded,
+      downloadStarted,
+      processed,
+      waiting,
+      percent,
+    };
+  }
+
+  function renderLandInfoDirectProgress(directWorker) {
+    const request = pickLandInfoDirectRequest(directWorker);
+    const heartbeat = directWorker && directWorker.latest_heartbeat && typeof directWorker.latest_heartbeat === 'object'
+      ? directWorker.latest_heartbeat
+      : {};
+    if (!request) {
+      if (el.landInfoDirectStatus) {
+        el.landInfoDirectStatus.className = 'status';
+        el.landInfoDirectStatus.textContent = '대기';
+      }
+      setProgressValue(el.landInfoDirectProgressBar, 0);
+      setBuildingHubText(el.landInfoDirectFileProgress, '-');
+      setBuildingHubText(el.landInfoDirectBytes, formatBytes(directWorker && directWorker.accepted_upload_bytes));
+      setBuildingHubText(el.landInfoDirectCurrentFile, '-');
+      setBuildingHubText(el.landInfoDirectWorker, heartbeat.worker_id ? `${heartbeat.worker_id} / ${heartbeat.status || '-'}` : '-');
+      setBuildingHubText(el.landInfoDirectDetail, heartbeat.received_at ? `heartbeat ${formatIsoToLocale(heartbeat.received_at)}` : '-');
+      return null;
+    }
+
+    const progress = directRequestProgress(request);
+    const status = request.status || heartbeat.status || 'requested';
+    if (el.landInfoDirectStatus) {
+      el.landInfoDirectStatus.className = statusClass(status);
+      el.landInfoDirectStatus.textContent = status;
+    }
+    setProgressValue(el.landInfoDirectProgressBar, progress.percent, status);
+
+    const expectedText = progress.expected > 0 ? progress.expected.toLocaleString() : '-';
+    const progressParts = [
+      `${progress.accepted.toLocaleString()}/${expectedText}`,
+      `up ${progress.uploading.toLocaleString()}`,
+      `wait ${progress.waiting.toLocaleString()}`,
+    ];
+    if (progress.failed > 0) progressParts.push(`fail ${progress.failed.toLocaleString()}`);
+    setBuildingHubText(el.landInfoDirectFileProgress, progressParts.join(' / '));
+    setBuildingHubText(el.landInfoDirectBytes, formatBytes(request.accepted_upload_bytes || directWorker.accepted_upload_bytes));
+    setBuildingHubText(el.landInfoDirectCurrentFile, heartbeat.current_file_id || '-');
+    const workerText = heartbeat.worker_id
+      ? `${heartbeat.worker_id} / ${heartbeat.status || '-'}`
+      : (request.claimed_by || '-');
+    setBuildingHubText(el.landInfoDirectWorker, workerText);
+    const detailParts = [
+      request.request_id || '-',
+      heartbeat.message || '',
+      formatIsoToLocale(heartbeat.received_at || request.updated_at),
+    ].filter(Boolean);
+    setBuildingHubText(el.landInfoDirectDetail, detailParts.join(' / '));
+    return { request, progress };
+  }
+
+  function landInfoSyncFileRows() {
+    const data = state.landInfoSync || {};
+    const localWork = data.local_work && typeof data.local_work === 'object' ? data.local_work : {};
+    const requestItems = localWork.worker_requests && Array.isArray(localWork.worker_requests.items)
+      ? localWork.worker_requests.items
+      : [];
+    const downloadItems = localWork.worker_downloads && Array.isArray(localWork.worker_downloads.items)
+      ? localWork.worker_downloads.items
+      : [];
+    const stagingItems = localWork.staging && Array.isArray(localWork.staging.items) ? localWork.staging.items : [];
+    const importItems = Array.isArray(data.recent_import_files) ? data.recent_import_files : [];
+    const directWorker = data.direct_worker && typeof data.direct_worker === 'object' ? data.direct_worker : {};
+    const directRequests = Array.isArray(directWorker.recent_requests) ? directWorker.recent_requests : [];
+    const rows = [];
+    directRequests.slice(0, 4).forEach((item) => rows.push({
+      stage: 'direct',
+      file: item.request_id,
+      size: item.accepted_upload_bytes,
+      at: item.updated_at || item.created_at,
+      status: item.status || 'REQUESTED',
+    }));
+    requestItems.slice(0, 3).forEach((item) => rows.push({
+      stage: 'request',
+      file: item.name,
+      size: item.size,
+      at: item.modified_at,
+      status: 'REQUESTED',
+    }));
+    downloadItems.slice(0, 5).forEach((item) => rows.push({
+      stage: 'worker',
+      file: item.name,
+      size: item.size,
+      at: item.modified_at,
+      status: 'DOWNLOADED',
+    }));
+    stagingItems.slice(0, 4).forEach((item) => rows.push({
+      stage: item.parent || 'staging',
+      file: item.name,
+      size: item.size,
+      at: item.modified_at,
+      status: 'STAGED',
+    }));
+    importItems.slice(0, 5).forEach((item) => rows.push({
+      stage: 'imported',
+      file: item.file_name,
+      size: item.file_size,
+      at: item.created_at,
+      status: item.release_status || 'RECORDED',
+    }));
+    return rows.slice(0, 12);
+  }
+
+  function renderLandInfoSyncFileRows() {
+    if (!el.landInfoSyncFileRows) return;
+    const rows = landInfoSyncFileRows();
+    if (rows.length < 1) {
+      el.landInfoSyncFileRows.innerHTML = `
+        <tr>
+          <td colspan="4" class="muted">토지정보 워커 파일 이력이 없습니다.</td>
+        </tr>
+      `;
+      return;
+    }
+    el.landInfoSyncFileRows.innerHTML = rows.map((item) => `
+      <tr>
+        <td>${escapeHtml(item.stage || '-')}</td>
+        <td class="mono">${escapeHtml(item.file || '-')}<div class="muted mono">${escapeHtml(formatBytes(item.size))}</div></td>
+        <td>${escapeHtml(formatIsoToLocale(item.at))}</td>
+        <td><span class="${statusClass(item.status)}">${escapeHtml(item.status || '-')}</span></td>
+      </tr>
+    `).join('');
+  }
+
+  function renderLandInfoSyncStatus() {
+    const data = state.landInfoSync || {};
+    const scheduler = data.scheduler && typeof data.scheduler === 'object' ? data.scheduler : {};
+    const activeRelease = data.active_release && typeof data.active_release === 'object' ? data.active_release : {};
+    const componentReleases = data.component_releases && typeof data.component_releases === 'object'
+      ? data.component_releases
+      : {};
+    const latestRun = data.latest_run && typeof data.latest_run === 'object' ? data.latest_run : {};
+    const verification = latestRun.verification && typeof latestRun.verification === 'object'
+      ? latestRun.verification
+      : {};
+    const latestJob = data.latest_job && typeof data.latest_job === 'object' ? data.latest_job : {};
+    const localWork = data.local_work && typeof data.local_work === 'object' ? data.local_work : {};
+    const directWorker = data.direct_worker && typeof data.direct_worker === 'object' ? data.direct_worker : {};
+    const directInfo = renderLandInfoDirectProgress(directWorker);
+    const latestHeartbeat = directWorker.latest_heartbeat && typeof directWorker.latest_heartbeat === 'object'
+      ? directWorker.latest_heartbeat
+      : {};
+    const directRequest = directInfo && directInfo.request ? directInfo.request : null;
+
+    const latestJobStatus = String(latestJob.status || '').toUpperCase();
+    const statusValue = directRequest && directRequest.status
+      ? String(directRequest.status)
+      : (latestJobStatus || (latestHeartbeat.status ? `worker_${latestHeartbeat.status}` : 'WAITING'));
+    const statusReason = directRequest && directRequest.request_id ? ` (${directRequest.request_id})` : '';
+    if (statusValue && el.landInfoSyncStatus) {
+      el.landInfoSyncStatus.innerHTML =
+        `<span class="${statusClass(statusValue)}">${escapeHtml(statusValue)}</span>${escapeHtml(statusReason)}`;
+    } else {
+      setBuildingHubText(el.landInfoSyncStatus, '-');
+    }
+
+    const releaseText = activeRelease.id
+      ? `${activeRelease.id} (${activeRelease.version || '-'}) / ${Number(activeRelease.records_count || 0).toLocaleString()} rows`
+      : '-';
+    setBuildingHubText(el.landInfoSyncRelease, releaseText);
+
+    const componentOrder = ['AL_D155', 'AL_D157', 'AL_D161', 'AL_D195'];
+    const componentText = componentOrder.map((code) => {
+      const item = componentReleases[code] && typeof componentReleases[code] === 'object'
+        ? componentReleases[code]
+        : null;
+      if (!item || !item.id) return `${code}: -`;
+      return `${code}: ${item.id} / ${Number(item.records_count || 0).toLocaleString()}`;
+    }).join('<br>');
+    if (el.landInfoSyncComponents) {
+      el.landInfoSyncComponents.innerHTML = componentText;
+    }
+
+    const baseDates = latestRun.base_dates && typeof latestRun.base_dates === 'object' ? latestRun.base_dates : {};
+    const snapshotText = Object.keys(baseDates).length > 0
+      ? Object.entries(baseDates).map(([code, value]) => `${code}:${value}`).join(' / ')
+      : (latestRun.snapshot_key || '-');
+    setBuildingHubText(el.landInfoSyncSnapshot, snapshotText);
+    setBuildingHubText(el.landInfoSyncNextCheck, formatIsoToLocale(latestHeartbeat.received_at || latestHeartbeat.modified_at));
+
+    const runText = directRequest && directRequest.status
+      ? `${directRequest.status} / ${formatIsoToLocale(directRequest.worker_completed_at || directRequest.updated_at || directRequest.created_at)}`
+      : (latestRun.status
+        ? `${latestRun.status} / ${formatIsoToLocale(latestRun.finished_at || latestRun.started_at)}`
+        : '-');
+    setBuildingHubText(el.landInfoSyncLastRun, runText);
+
+    const jobText = latestJob.id
+      ? `${latestJob.id} (${latestJob.status || '-'}) ${Number(latestJob.processed_files || 0).toLocaleString()}/${Number(latestJob.total_files || 0).toLocaleString()} files / ${Number(latestJob.inserted_rows || 0).toLocaleString()} rows`
+      : '-';
+    setBuildingHubText(el.landInfoSyncJob, jobText);
+
+    const downloads = localWork.worker_downloads && localWork.worker_downloads.count != null
+      ? Number(localWork.worker_downloads.count || 0)
+      : 0;
+    const requests = localWork.worker_requests && localWork.worker_requests.count != null
+      ? Number(localWork.worker_requests.count || 0)
+      : 0;
+    const directRequests = directWorker.request_count != null ? Number(directWorker.request_count || 0) : 0;
+    const acceptedUploads = directWorker.accepted_upload_count != null ? Number(directWorker.accepted_upload_count || 0) : 0;
+    const expected = latestRun.expected_count != null ? Number(latestRun.expected_count || 0) : '-';
+    if (directInfo && directInfo.progress && directInfo.progress.expected > 0) {
+      const p = directInfo.progress;
+      setBuildingHubText(
+        el.landInfoSyncWork,
+        `${p.accepted.toLocaleString()}/${p.expected.toLocaleString()} accepted / uploading ${p.uploading.toLocaleString()} / waiting ${p.waiting.toLocaleString()} / ${formatBytes(directInfo.request.accepted_upload_bytes || directWorker.accepted_upload_bytes)}`
+      );
+    } else {
+      setBuildingHubText(el.landInfoSyncWork, `${downloads}/${expected} zip / direct ${acceptedUploads} accepted / request ${requests + directRequests}`);
+    }
+
+    const verificationText = verification.expected_count != null
+      ? `${Number(verification.recorded_count || 0).toLocaleString()}/${Number(verification.expected_count || 0).toLocaleString()} recorded`
+      : (data.import_file_count != null ? `${Number(data.import_file_count || 0).toLocaleString()} recorded` : '-');
+    setBuildingHubText(el.landInfoSyncVerification, verificationText);
+    const shouldShowJobProgress = latestJob.id && ['QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'].includes(latestJobStatus);
+    if (directInfo && directInfo.progress && directInfo.progress.expected > 0 && !shouldShowJobProgress) {
+      setProgressValue(el.landInfoSyncProgressBar, directInfo.progress.percent, directInfo.request.status);
+    } else {
+      setProgressBar(el.landInfoSyncProgressBar, latestJob);
+    }
+    renderLandInfoSyncFileRows();
+  }
+
   function isJobRunningStatus(status) {
     return status === 'RUNNING';
   }
@@ -1469,36 +2482,18 @@
       el.appCfgIosTitle,
       el.appCfgIosMessage,
       el.saveAppCfgIosBtn,
-      el.simpleUploadDataType,
-      el.operationMode,
-      el.simpleUploadVersion,
-      el.simpleUploadSourceName,
-      el.serverImportRun,
       ...(el.clearDataTypeButtons || []),
       el.refreshReleasesBtn,
       el.refreshJobsBtn,
       el.refreshWorkersBtn,
       el.refreshUpdateSummaryBtn,
       el.refreshUpdateFilesBtn,
+      el.refreshAutomationStatusBtn,
     ];
 
     lockTargets.forEach((node) => {
       if (node) node.disabled = shouldLock;
     });
-
-    if (el.uiLockNotice) {
-      if (shouldLock) {
-        const jobSummary = openJobs.length
-          ? openJobs.map((j) => `${j.id}:${j.status}`).join(', ')
-          : '-';
-        el.uiLockNotice.style.display = 'block';
-        el.uiLockNotice.textContent =
-          `적재 진행 중에는 입력이 잠깁니다. 취소만 가능합니다. (open jobs: ${jobSummary})`;
-      } else {
-        el.uiLockNotice.style.display = 'none';
-        el.uiLockNotice.textContent = '';
-      }
-    }
 
     if (el.jobRows) {
       Array.from(el.jobRows.querySelectorAll('button[data-action="cancel-job"]')).forEach((btn) => {
@@ -1755,74 +2750,6 @@
     throw new Error('클리어 상태 확인 시간 초과');
   }
 
-  async function runImportFromServerPath() {
-    if (state.uiLocked) {
-      const reason = '적재 진행 중에는 취소만 가능합니다.';
-      log(reason);
-      alert(reason);
-      return;
-    }
-
-    const dataType = (el.simpleUploadDataType.value || 'cadastral').trim().toLowerCase().replace(/-/g, '_');
-    const operationMode = (el.operationMode && el.operationMode.value ? el.operationMode.value : 'full')
-      .trim()
-      .toLowerCase() === 'update' ? 'update' : 'full';
-    const sourcePath = currentAutoSourcePath();
-
-    const version = el.simpleUploadVersion.value.trim();
-    const sourceName = el.simpleUploadSourceName.value.trim();
-    const body = {
-      data_type: dataType,
-      operation_mode: operationMode === 'update' ? 'update' : 'full',
-      source_path: sourcePath,
-      mark_ready: true,
-    };
-    if (version) body.version = version;
-    if (sourceName) body.source_name = sourceName;
-
-    state.uploadInFlight = true;
-    updateUiLockState();
-    try {
-      log(`서버 경로 적재 시작: 유형=${dataType}, 모드=${body.operation_mode}, 경로=${sourcePath}`);
-      const data = await api('/v1/admin/cadastral/import-from-path', {
-        method: 'POST',
-        body: JSON.stringify(body),
-      });
-      log(`적재 시작 완료: release ${data.release_id}(${data.release_version}), job ${data.job_id}, mode=${data.operation_mode || body.operation_mode}`);
-      log(`적재 대상 ${data.total_files}개, pattern=${data.pattern}, source=${data.source_path}`);
-      if ((data.operation_mode || body.operation_mode) === 'full') {
-        log('전체 업로드: 새 release 적재 완료 후 이전 release를 자동 삭제합니다.');
-      }
-      if ((data.operation_mode || body.operation_mode) === 'update') {
-        log('업데이트 모드: 추가/수정/삭제 컬럼을 기준으로 변경분을 반영합니다.');
-      }
-      if ((data.operation_mode || body.operation_mode) === 'full') {
-        const run = data.run || {};
-        const dataTypeText = dataTypeLabel(dataType);
-        const parallelEligible = !!run.parallel_import_enabled;
-        if (parallelEligible) {
-          const workersMode = run.parallel_workers_mode || 'auto';
-          const workersText = workersMode === 'fixed'
-            ? `고정 ${run.parallel_workers || 1}개`
-            : '자동(히스토리/CPU 기준)';
-          const batchText = run.batch_size || '-';
-          log(`성능 모드: ${dataTypeText} 전체 업로드는 병렬 처리 + COPY 적재로 실행됩니다. workers=${workersText}, batch_size=${batchText}`);
-        } else {
-          log(`성능 모드: ${dataTypeText} 전체 업로드 병렬 처리 조건이 충족되지 않아 단일 경로로 실행됩니다.`);
-        }
-      }
-      await reloadAll();
-      scheduleMonitor(1000);
-    } catch (e) {
-      const message = `서버 경로 적재 실패: ${e.message || e}`;
-      log(message);
-      alert(message);
-    } finally {
-      state.uploadInFlight = false;
-      updateUiLockState();
-    }
-  }
-
   async function clearDataType(dataType) {
     const normalizedType = (dataType || '').trim().toLowerCase().replace(/-/g, '_');
     if (!normalizedType) return;
@@ -2036,6 +2963,134 @@
     }
   }
 
+  async function loadBuildingHubSyncStatus(silent = false) {
+    try {
+      const data = await api('/v1/admin/building-hub-sync/status', { method: 'GET' });
+      state.buildingHubSync = data && typeof data === 'object' ? data : {};
+      renderBuildingHubSyncStatus();
+      if (!silent) log('건축물정보 자동 적재 상태 조회 완료');
+    } catch (e) {
+      state.buildingHubSync = null;
+      renderBuildingHubSyncStatus();
+      if (el.buildingHubFileRows) {
+        el.buildingHubFileRows.innerHTML = `
+          <tr>
+            <td colspan="5" class="muted">건축HUB 자동화 상태 조회 실패: ${escapeHtml(e.message || e)}</td>
+          </tr>
+        `;
+      }
+      if (!silent) log(`건축HUB 자동화 상태 조회 실패: ${e.message}`);
+    }
+  }
+
+  async function loadCadastralSyncStatus(silent = false) {
+    try {
+      const data = await api('/v1/admin/cadastral-sync/status', { method: 'GET' });
+      state.cadastralSync = data && typeof data === 'object' ? data : {};
+      renderCadastralSyncStatus();
+      if (!silent) log('연속지적 자동 증분 상태 조회 완료');
+    } catch (e) {
+      const activeRelease = state.releases.find((r) => r.is_active && r.data_type === 'cadastral') || null;
+      const latestJob = state.jobs.find((j) => (j.data_type || 'cadastral') === 'cadastral') || null;
+      const recentUpdateFiles = state.updateFiles
+        .filter((item) => (item.data_type || 'cadastral') === 'cadastral')
+        .slice(0, 8);
+      const jobStatus = String((latestJob && latestJob.status) || '').toUpperCase();
+      const schedulerStatus = jobStatus === 'RUNNING' || jobStatus === 'QUEUED' ? 'IMPORTING' : 'WAITING';
+      state.cadastralSync = {
+        active_release: activeRelease,
+        latest_job: latestJob,
+        recent_update_files: recentUpdateFiles,
+        update_file_count: recentUpdateFiles.length,
+        local_work: {},
+        scheduler: {
+          status: schedulerStatus,
+          reason: latestJob ? `기존 job API 기준 (${latestJob.id})` : '전용 상태 API 반영 대기',
+        },
+      };
+      renderCadastralSyncStatus();
+      if (el.cadastralSyncFileRows) {
+        const firstRow = el.cadastralSyncFileRows.querySelector('tr td');
+        if (firstRow && String(firstRow.textContent || '').includes('파일 이력이 없습니다')) {
+          firstRow.textContent = `전용 상태 API 반영 대기: ${e.message || e}`;
+        }
+      }
+      if (!silent) log(`연속지적 자동화 상태는 기존 job API로 표시 중: ${e.message}`);
+    }
+  }
+
+  async function loadBuildingIntegratedSyncStatus(silent = false) {
+    try {
+      const data = await api('/v1/admin/building-integrated-sync/status', { method: 'GET' });
+      state.buildingIntegratedSync = data && typeof data === 'object' ? data : {};
+      renderBuildingIntegratedSyncStatus();
+      if (!silent) log('건물통합정보 자동 증분 상태 조회 완료');
+    } catch (e) {
+      const activeRelease = state.releases.find((r) => r.is_active && r.data_type === 'building_integrated_info') || null;
+      const latestJob = state.jobs.find((j) => (j.data_type || 'cadastral') === 'building_integrated_info') || null;
+      const recentUpdateFiles = state.updateFiles
+        .filter((item) => (item.data_type || 'cadastral') === 'building_integrated_info')
+        .slice(0, 8);
+      const jobStatus = String((latestJob && latestJob.status) || '').toUpperCase();
+      const schedulerStatus = jobStatus === 'RUNNING' || jobStatus === 'QUEUED' ? 'IMPORTING' : 'WAITING';
+      state.buildingIntegratedSync = {
+        active_release: activeRelease,
+        latest_job: latestJob,
+        recent_update_files: recentUpdateFiles,
+        update_file_count: recentUpdateFiles.length,
+        local_work: {},
+        scheduler: {
+          status: schedulerStatus,
+          reason: latestJob ? `기존 job API 기준 (${latestJob.id})` : '전용 상태 API 반영 대기',
+        },
+      };
+      renderBuildingIntegratedSyncStatus();
+      if (el.buildingIntegratedSyncFileRows) {
+        const firstRow = el.buildingIntegratedSyncFileRows.querySelector('tr td');
+        if (firstRow && String(firstRow.textContent || '').includes('파일 이력이 없습니다')) {
+          firstRow.textContent = `전용 상태 API 반영 대기: ${e.message || e}`;
+        }
+      }
+      if (!silent) log(`건물통합정보 자동화 상태는 기존 job API로 표시 중: ${e.message}`);
+    }
+  }
+
+  async function loadLandInfoSyncStatus(silent = false) {
+    try {
+      const data = await api('/v1/admin/land-info-sync/status', { method: 'GET' });
+      state.landInfoSync = data && typeof data === 'object' ? data : {};
+      renderLandInfoSyncStatus();
+      if (!silent) log('토지정보 워커 상태 조회 완료');
+    } catch (e) {
+      const activeRelease = state.releases.find((r) => r.is_active && r.data_type === 'land_info') || null;
+      const latestJob = state.jobs.find((j) => (j.data_type || 'cadastral') === 'land_info') || null;
+      const recentImportFiles = state.updateFiles
+        .filter((item) => (item.data_type || 'cadastral') === 'land_info')
+        .slice(0, 8);
+      const jobStatus = String((latestJob && latestJob.status) || '').toUpperCase();
+      const schedulerStatus = jobStatus === 'RUNNING' || jobStatus === 'QUEUED' ? 'IMPORTING' : 'WAITING';
+      state.landInfoSync = {
+        active_release: activeRelease,
+        latest_job: latestJob,
+        recent_import_files: recentImportFiles,
+        import_file_count: recentImportFiles.length,
+        local_work: {},
+        scheduler: {
+          status: schedulerStatus,
+          reason: latestJob ? `기존 job API 기준 (${latestJob.id})` : '전용 상태 API 반영 대기',
+        },
+      };
+      renderLandInfoSyncStatus();
+      if (el.landInfoSyncFileRows) {
+        const firstRow = el.landInfoSyncFileRows.querySelector('tr td');
+        if (firstRow && String(firstRow.textContent || '').includes('파일 이력이 없습니다')) {
+          firstRow.textContent = `전용 상태 API 반영 대기: ${e.message || e}`;
+        }
+      }
+      if (!silent) log(`토지정보 워커 상태는 기존 job API로 표시 중: ${e.message}`);
+    }
+  }
+
   async function reloadAll() {
     await Promise.all([
       loadTileConfig(),
@@ -2045,6 +3100,12 @@
       loadJobs(),
       loadJobWorkers(),
       loadUpdateFiles(true),
+    ]);
+    await Promise.all([
+      loadBuildingHubSyncStatus(true),
+      loadCadastralSyncStatus(true),
+      loadBuildingIntegratedSyncStatus(true),
+      loadLandInfoSyncStatus(true),
     ]);
     updateSummary();
   }
@@ -2127,6 +3188,12 @@
 
       if (releaseChanged || jobChanged || state.monitorTickCount % 10 === 0) {
         await loadTileConfig(true);
+      }
+      if (jobChanged || state.monitorTickCount % 10 === 0) {
+        await loadBuildingHubSyncStatus(true);
+        await loadCadastralSyncStatus(true);
+        await loadBuildingIntegratedSyncStatus(true);
+        await loadLandInfoSyncStatus(true);
       }
 
       updateSummary();
@@ -2277,6 +3344,15 @@
     updateSummary();
     scheduleMonitor();
   });
+  bindClick('refreshAutomationStatus', async () => {
+    await Promise.all([
+      loadBuildingHubSyncStatus(true),
+      loadCadastralSyncStatus(true),
+      loadBuildingIntegratedSyncStatus(true),
+      loadLandInfoSyncStatus(true),
+    ]);
+    scheduleMonitor();
+  });
   bindClick('saveAppCfgAndroid', async () => {
     await saveUpdatePolicyConfig('android');
     scheduleMonitor();
@@ -2285,23 +3361,12 @@
     await saveUpdatePolicyConfig('ios');
     scheduleMonitor();
   });
-  bindClick('serverImportRun', runImportFromServerPath);
   if (el.clearDataTypeButtons && el.clearDataTypeButtons.length > 0) {
     el.clearDataTypeButtons.forEach((btn) => {
       btn.addEventListener('click', () => {
         clearDataType(btn.dataset.dataType || '');
       });
     });
-  }
-  if (el.simpleUploadDataType) {
-    const syncServerPath = () => {
-      updateAutoSourcePathUi();
-    };
-    el.simpleUploadDataType.addEventListener('change', syncServerPath);
-    if (el.operationMode) {
-      el.operationMode.addEventListener('change', syncServerPath);
-    }
-    syncServerPath();
   }
   if (el.jobRows) {
     el.jobRows.addEventListener('click', (event) => {

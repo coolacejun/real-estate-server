@@ -16,4 +16,7 @@ CREATE INDEX IF NOT EXISTS land_info_record_release_pnu_idx
 CREATE INDEX IF NOT EXISTS land_info_record_release_dataset_pnu_idx
   ON public.land_info_record (release_id, dataset_code, pnu);
 
+CREATE INDEX IF NOT EXISTS land_info_record_release_dataset_pnu_id_idx
+  ON public.land_info_record (release_id, dataset_code, pnu, id);
+
 COMMIT;
