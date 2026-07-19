@@ -31,6 +31,9 @@ backup/
 .idea/
 *.log
 
+# Homepage (separate git repo: noriddori-jpg/real_estate_web)
+web/
+
 # Large source links (mounted data)
 연속지적
 건축물정보

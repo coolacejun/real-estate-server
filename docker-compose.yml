@@ -87,6 +87,23 @@ services:
       - redis
     restart: unless-stopped
 
+  web:
+    build: ./web
+    container_name: web
+    env_file: .env
+    environment:
+      - REAL_ESTATE_REPORT_HOST=0.0.0.0
+      - REAL_ESTATE_REPORT_PORT=5180
+      - APP_URL=https://building-land.com
+      # 같은 호스트의 api 컨테이너로 직접 프록시 (외부 왕복 방지)
+      - APP_SERVER_BASE_URL=http://api:8000
+      - AUTH_DB_PATH=/data/web/auth.sqlite3
+    volumes:
+      - ./data/web:/data/web
+    depends_on:
+      - api
+    restart: unless-stopped
+
   building-hub-sync:
     build: ./api
     container_name: building-hub-sync

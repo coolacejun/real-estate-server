@@ -300,6 +300,15 @@ def latest_job_for_release(api_base: str, token: str, release_id: int) -> dict[s
     return None
 
 
+def is_transient_import_poll_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, urllib.error.URLError)):
+        return True
+    text = str(exc).lower()
+    if "timed out" in text or "timeout" in text:
+        return True
+    return any(f"http {status}" in text for status in ("502", "503", "504"))
+
+
 def wait_for_import(
     api_base: str,
     token: str,
@@ -310,8 +319,31 @@ def wait_for_import(
 ) -> dict[str, Any]:
     started = time.time()
     last_status = ""
+    poll_failures = 0
+    last_poll_error: str | None = None
     while True:
-        job = latest_job_for_release(api_base, token, release_id)
+        elapsed = time.time() - started
+        if elapsed > timeout:
+            suffix = f"; last poll error: {last_poll_error}" if last_poll_error else ""
+            raise RuntimeError(f"import timed out: job_id={job_id}{suffix}")
+        try:
+            job = latest_job_for_release(api_base, token, release_id)
+        except Exception as exc:
+            if not is_transient_import_poll_error(exc):
+                raise
+            poll_failures += 1
+            last_poll_error = f"{type(exc).__name__}: {exc}"
+            print(
+                "[cycle] import status poll failed "
+                f"job={job_id} failures={poll_failures} error={last_poll_error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            sleep_for = min(max(5.0, poll_interval), max(1.0, timeout - elapsed))
+            time.sleep(sleep_for)
+            continue
+        poll_failures = 0
+        last_poll_error = None
         if not job:
             raise RuntimeError(f"import job not found: job_id={job_id} release_id={release_id}")
         status = str(job.get("status") or "")
@@ -329,8 +361,6 @@ def wait_for_import(
             if status != "SUCCEEDED":
                 raise RuntimeError(f"import failed: {json.dumps(job, ensure_ascii=False, default=str)}")
             return job
-        if time.time() - started > timeout:
-            raise RuntimeError(f"import timed out: job_id={job_id}")
         time.sleep(max(5.0, poll_interval))
 
 

@@ -1,5 +1,10 @@
 http:
   routers:
+    homepage:
+      rule: Host(`building-land.com`) || Host(`www.building-land.com`)
+      service: homepage
+      entryPoints:
+        - web
     api:
       rule: PathPrefix(`/`)
       service: api
@@ -16,3 +21,7 @@ http:
       loadBalancer:
         servers:
           - url: "http://api:8000"
+    homepage:
+      loadBalancer:
+        servers:
+          - url: "http://web:5180"

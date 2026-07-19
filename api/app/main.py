@@ -33,6 +33,8 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from psycopg import sql
 from logging.handlers import RotatingFileHandler
 
+from .pnu_aliases import pnu_query_candidates as _build_pnu_query_candidates
+
 app = FastAPI(title="building-land API", version="1.2.0")
 APP_DIR = Path(__file__).resolve().parent
 ADMIN_STATIC_DIR = APP_DIR / "static" / "admin"
@@ -2778,25 +2780,7 @@ def _payload_to_building_info_line(payload: dict[str, Any], bucket: str) -> str:
 
 
 def _pnu_query_candidates(pnu: str) -> list[str]:
-    """Return query candidates for PNU.
-
-    Some upstream clients occasionally send a PNU with wrong 산/대지 flag (11th digit).
-    We keep the original first, then try toggled flag as a fallback.
-    """
-    raw = str(pnu or "").strip()
-    if not raw:
-        return []
-    digits = "".join(ch for ch in raw if ch.isdigit())
-    if len(digits) < 19:
-        return [raw]
-    norm = digits[-19:]
-    candidates = [norm]
-    land_flag = norm[10]
-    if land_flag in {"0", "1"}:
-        toggled = f"{norm[:10]}{'1' if land_flag == '0' else '0'}{norm[11:]}"
-        if toggled != norm:
-            candidates.append(toggled)
-    return candidates
+    return _build_pnu_query_candidates(pnu)
 
 
 def _decode_json_or_gz_marker(value: Any) -> Any:
@@ -8547,6 +8531,13 @@ _SITE_REPORT_PRIORITY_LABELS = {
     "balance": "균형안",
 }
 
+_SITE_REPORT_ENGINE_CASE_CACHE_LOCK = Lock()
+_SITE_REPORT_ENGINE_CASE_CACHE: dict[str, Any] = {
+    "path": "",
+    "mtime": 0.0,
+    "payload": None,
+}
+
 
 def _site_report_number(value: Any, default: float = 0.0) -> float:
     try:
@@ -8646,6 +8637,224 @@ def _site_report_data_count(value: Any, key: str = "items") -> int:
     if isinstance(value, list):
         return len(value)
     return 0
+
+
+def _site_report_engine_cases_path() -> Path:
+    return Path(
+        os.getenv(
+            "SITE_PLAN_ENGINE_CASES_PATH",
+            "/Users/jun/site_plan/data/full_drawing_audit/engine_seed_cases_a_only.json",
+        )
+    )
+
+
+def _load_site_report_engine_cases() -> dict[str, Any]:
+    path = _site_report_engine_cases_path()
+    if not path.exists():
+        return {"summary": {}, "records": []}
+
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"summary": {}, "records": []}
+
+    with _SITE_REPORT_ENGINE_CASE_CACHE_LOCK:
+        if (
+            _SITE_REPORT_ENGINE_CASE_CACHE.get("path") == str(path)
+            and _SITE_REPORT_ENGINE_CASE_CACHE.get("mtime") == stat.st_mtime
+            and isinstance(_SITE_REPORT_ENGINE_CASE_CACHE.get("payload"), dict)
+        ):
+            return _SITE_REPORT_ENGINE_CASE_CACHE["payload"]
+
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as exc:
+            logger.warning("failed to load site report engine cases: %s", exc)
+            payload = {"summary": {}, "records": []}
+
+        _SITE_REPORT_ENGINE_CASE_CACHE.update(
+            {
+                "path": str(path),
+                "mtime": stat.st_mtime,
+                "payload": payload,
+            }
+        )
+        return payload
+
+
+def _site_report_case_keywords(use: str) -> list[str]:
+    keywords = {
+        "house": ["단독", "주택", "거실", "주방", "침실", "안방"],
+        "multi": ["다가구", "다세대", "세대", "원룸", "공용", "계단"],
+        "retail": ["근린", "상가", "매장", "판매", "전시", "사무", "창고"],
+        "mixed": ["상가", "근린", "주거", "거실", "침실", "계단", "주차"],
+    }
+    return keywords.get(use, keywords["mixed"])
+
+
+def _site_report_case_program_text(case: dict[str, Any]) -> str:
+    program = case.get("program_summary") if isinstance(case, dict) else {}
+    if not isinstance(program, dict):
+        return ""
+    parts: list[str] = []
+    for item in program.get("top_room_labels") or []:
+        if isinstance(item, dict):
+            parts.append(str(item.get("label") or ""))
+    for item in program.get("top_categories") or []:
+        if isinstance(item, dict):
+            parts.append(str(item.get("category") or ""))
+    return " ".join(part for part in parts if part)
+
+
+def _site_report_case_values(case: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    values = case.get("extracted_values")
+    return values if isinstance(values, dict) else {}
+
+
+def _site_report_case_area_similarity(body: dict[str, Any], case: dict[str, Any]) -> float:
+    target_pyeong = _site_report_number(body.get("area_pyeong") or body.get("area"), 0)
+    if target_pyeong <= 0:
+        return 0.0
+
+    values = _site_report_case_values(case)
+    metric = values.get("gross_floor_area") or values.get("site_area") or values.get("building_area")
+    if not isinstance(metric, dict):
+        return 0.0
+
+    case_value = _site_report_number(metric.get("value"), 0)
+    if case_value <= 0:
+        return 0.0
+
+    target_m2 = target_pyeong * 3.305785
+    ratio = min(target_m2, case_value) / max(target_m2, case_value)
+    return max(0.0, min(15.0, ratio * 15.0))
+
+
+def _site_report_score_engine_case(body: dict[str, Any], case: dict[str, Any]) -> tuple[float, list[str], list[str]]:
+    use = str(body.get("use") or "mixed").strip()
+    program_text = _site_report_case_program_text(case)
+    keyword_hits = [word for word in _site_report_case_keywords(use) if word and word in program_text]
+    program = case.get("program_summary") if isinstance(case.get("program_summary"), dict) else {}
+    values = _site_report_case_values(case)
+    usage = str(case.get("engine_usage") or "")
+    bundle_type = str(case.get("bundle_type") or "")
+
+    base_score = _site_report_number(case.get("engine_score"), 0) * 0.42
+    usage_bonus = {
+        "primary_engine_case": 24,
+        "secondary_engine_case": 16,
+        "floor_pattern_source": 10,
+        "site_value_reference": 8,
+        "overview_value_reference": 6,
+    }.get(usage, 3)
+    keyword_bonus = min(len(keyword_hits), 4) * 5
+    area_bonus = _site_report_case_area_similarity(body, case)
+    signal_bonus = 0.0
+    if _site_report_number(program.get("core_candidate_count"), 0) > 0:
+        signal_bonus += 4
+    if _site_report_number(program.get("parking_candidate_count"), 0) > 0:
+        signal_bonus += 4
+    if _site_report_number(program.get("road_candidate_count"), 0) > 0:
+        signal_bonus += 4
+    if values:
+        signal_bonus += min(len(values), 5)
+
+    score = round(min(100.0, base_score + usage_bonus + keyword_bonus + area_bonus + signal_bonus), 1)
+    reasons = []
+    if bundle_type == "engine_complete_a":
+        reasons.append("A등급 개요/면적표·배치·평면이 함께 있는 사례")
+    elif usage == "secondary_engine_case":
+        reasons.append("A등급 개요/면적표와 평면을 함께 가진 보조 사례")
+    elif usage == "floor_pattern_source":
+        reasons.append("A등급 평면 패턴 참고 사례")
+    if keyword_hits:
+        reasons.append(f"요청 용도와 겹치는 공간 키워드: {', '.join(keyword_hits[:4])}")
+    if area_bonus > 0:
+        reasons.append("입력 목표 면적과 사례 추출 면적이 비교 가능")
+    if program.get("core_candidate_count"):
+        reasons.append("코어 후보가 추출됨")
+    if program.get("parking_candidate_count"):
+        reasons.append("주차 후보가 추출됨")
+
+    differences = []
+    if usage != "primary_engine_case":
+        differences.append("개요·배치·평면 중 일부 묶음이 부족해 보조 근거로 사용")
+    if not values:
+        differences.append("면적값 추출 근거가 약해 공사비·규모 판단에는 제한")
+    return score, reasons[:5], differences[:3]
+
+
+def _site_report_compact_engine_case(case: dict[str, Any], score: float, reasons: list[str], differences: list[str]) -> dict[str, Any]:
+    selected = case.get("selected_files") if isinstance(case.get("selected_files"), dict) else {}
+
+    def ids(name: str) -> list[str]:
+        items = selected.get(name)
+        if not isinstance(items, list):
+            return []
+        return [str(item.get("file_id")) for item in items if isinstance(item, dict) and item.get("file_id")]
+
+    program = case.get("program_summary") if isinstance(case.get("program_summary"), dict) else {}
+    labels = []
+    for item in program.get("top_room_labels") or []:
+        if isinstance(item, dict) and item.get("label"):
+            labels.append(str(item["label"]))
+
+    return {
+        "case_id": str(case.get("case_id") or ""),
+        "project_hash": str(case.get("project_hash") or ""),
+        "match_score": score,
+        "bundle_type": str(case.get("bundle_type") or ""),
+        "engine_usage": str(case.get("engine_usage") or ""),
+        "room_labels": labels[:8],
+        "values": _site_report_case_values(case),
+        "selected_file_ids": {
+            "overview": ids("overview"),
+            "site": ids("site"),
+            "floor": ids("floor"),
+        },
+        "reasons": reasons,
+        "differences": differences,
+    }
+
+
+def _match_site_report_engine_cases(body: dict[str, Any], limit: int = 3) -> dict[str, Any]:
+    payload = _load_site_report_engine_cases()
+    records = payload.get("records")
+    if not isinstance(records, list) or not records:
+        return {
+            "source": "a_grade_case_engine",
+            "available": False,
+            "summary": payload.get("summary") if isinstance(payload.get("summary"), dict) else {},
+            "matched_cases": [],
+        }
+
+    scored: list[tuple[float, dict[str, Any], list[str], list[str]]] = []
+    for case in records:
+        if not isinstance(case, dict):
+            continue
+        usage = str(case.get("engine_usage") or "")
+        if usage not in {
+            "primary_engine_case",
+            "secondary_engine_case",
+            "floor_pattern_source",
+            "site_value_reference",
+            "overview_value_reference",
+        }:
+            continue
+        score, reasons, differences = _site_report_score_engine_case(body, case)
+        if score <= 0:
+            continue
+        scored.append((score, case, reasons, differences))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    matched = [_site_report_compact_engine_case(case, score, reasons, differences) for score, case, reasons, differences in scored[:limit]]
+    return {
+        "source": "a_grade_case_engine",
+        "available": bool(matched),
+        "summary": payload.get("summary") if isinstance(payload.get("summary"), dict) else {},
+        "matched_cases": matched,
+    }
 
 
 def _site_report_clip(value: Any, limit: int) -> Any:
@@ -8780,6 +8989,15 @@ def _build_site_plan_report_draft(body: dict[str, Any], site_data: dict[str, Any
     low = round(area * rates["low"])
     high = round(area * rates["high"])
     basis = _site_report_basis(site_data)
+    design_engine = site_data.get("design_engine") if isinstance(site_data.get("design_engine"), dict) else {}
+    matched_cases = design_engine.get("matched_cases") if isinstance(design_engine.get("matched_cases"), list) else []
+    primary_matches = [case for case in matched_cases if isinstance(case, dict) and case.get("engine_usage") == "primary_engine_case"]
+    case_basis_label = f"A등급 사례 {len(matched_cases)}건" if matched_cases else ("PNU 연결" if pnu else "주소 기준")
+    case_basis_caption = (
+        f"1차 후보 {len(primary_matches)}건 포함"
+        if primary_matches
+        else (pnu or "후보 선택 대기")
+    )
     budget_fit = budget >= low if budget else False
     today = time.strftime("%Y. %-m. %-d.") if os.name != "nt" else time.strftime("%Y. %#m. %#d.")
 
@@ -8809,12 +9027,16 @@ def _build_site_plan_report_draft(body: dict[str, Any], site_data: dict[str, Any
             {"label": "권장 규모", "value": f"{area:g}평", "caption": "사용자 입력 기준"},
             {"label": "공사비 범위", "value": f"{_site_report_money(low)}~{_site_report_money(high)}", "caption": "개략 추정"},
             {"label": "예산 적합도", "value": "양호" if budget_fit else "조정 필요", "caption": f"{_site_report_money(budget)} 입력" if budget else "예산 미입력"},
-            {"label": "데이터 근거", "value": "PNU 연결" if pnu else "주소 기준", "caption": pnu or "후보 선택 대기"},
+            {"label": "데이터 근거", "value": case_basis_label, "caption": case_basis_caption},
         ],
         "design": [
             design_by_use.get(use, design_by_use["mixed"]),
             design_by_priority.get(priority, design_by_priority["balance"]),
-            "조회 데이터와 현장 조건을 대조해 접도, 채광, 주차, 피난 동선을 우선 검토합니다.",
+            (
+                f"A등급 유사 사례 {len(matched_cases)}건의 공간명·코어·주차 추출값을 보조 근거로 사용합니다."
+                if matched_cases
+                else "조회 데이터와 현장 조건을 대조해 접도, 채광, 주차, 피난 동선을 우선 검토합니다."
+            ),
         ],
         "costNote": (
             f"{use_label}의 목표 연면적 {area:g}평을 기준으로 {_site_report_money(low)}에서 "
@@ -8828,6 +9050,7 @@ def _build_site_plan_report_draft(body: dict[str, Any], site_data: dict[str, Any
         ],
         "basis": basis,
         "floorPlan": _site_report_floor_plan(use),
+        "caseMatches": matched_cases,
     }
 
 
@@ -8892,6 +9115,35 @@ def _normalize_site_report(ai_report: Any, fallback: dict[str, Any]) -> dict[str
             "violation": str(basis.get("violation") or fallback["basis"]["violation"]),
         }
 
+    case_matches = ai_report.get("caseMatches")
+    fallback_matches = fallback.get("caseMatches") if isinstance(fallback.get("caseMatches"), list) else []
+    if isinstance(case_matches, list):
+        normalized_matches = []
+        for item in case_matches[:3]:
+            if not isinstance(item, dict):
+                continue
+            case_id = str(item.get("case_id") or "").strip()
+            if not case_id:
+                continue
+            reasons = item.get("reasons")
+            differences = item.get("differences")
+            normalized_matches.append(
+                {
+                    "case_id": case_id,
+                    "project_hash": str(item.get("project_hash") or ""),
+                    "match_score": _site_report_number(item.get("match_score"), 0),
+                    "bundle_type": str(item.get("bundle_type") or ""),
+                    "engine_usage": str(item.get("engine_usage") or ""),
+                    "room_labels": [str(label) for label in item.get("room_labels", [])[:8]] if isinstance(item.get("room_labels"), list) else [],
+                    "selected_file_ids": item.get("selected_file_ids") if isinstance(item.get("selected_file_ids"), dict) else {},
+                    "reasons": [str(reason) for reason in reasons[:5]] if isinstance(reasons, list) else [],
+                    "differences": [str(diff) for diff in differences[:3]] if isinstance(differences, list) else [],
+                }
+            )
+        result["caseMatches"] = normalized_matches or fallback_matches
+    elif fallback_matches:
+        result["caseMatches"] = fallback_matches
+
     floor_plan = ai_report.get("floorPlan")
     if isinstance(floor_plan, dict):
         fallback_plan = fallback.get("floorPlan", {})
@@ -8938,6 +9190,7 @@ def _build_site_report_prompt(body: dict[str, Any], site_data: dict[str, Any]) -
     system_prompt = (
         "당신은 한국 건축 기획 보고서를 작성하는 시니어 건축 컨설턴트입니다. "
         "제공된 토지·건축물 데이터를 근거로 하되, 인허가와 견적은 현장 조사와 전문가 검토 후 확정된다는 점을 명확히 유지하세요. "
+        "design_engine.matched_cases가 있으면 유사 사례 기반 근거로만 사용하고 원본 도면을 복제하거나 특정 프로젝트를 식별하지 마세요. "
         "응답은 반드시 한국어 JSON 객체만 반환하세요."
     )
     user_prompt = (
@@ -8955,10 +9208,12 @@ def _build_site_report_prompt(body: dict[str, Any], site_data: dict[str, Any]) -
         "\"design\": [string],"
         "\"costNote\": string,"
         "\"risks\": [string],"
+        "\"caseMatches\": [{\"case_id\": string, \"project_hash\": string, \"match_score\": number, \"bundle_type\": string, \"engine_usage\": string, \"room_labels\": [string], \"reasons\": [string], \"differences\": [string]}],"
         "\"basis\": {\"land\": string, \"building\": string, \"violation\": string},"
         "\"floorPlan\": {\"name\": string, \"rooms\": [{\"label\": string, \"size\": string, \"x\": number, \"y\": number, \"w\": number, \"h\": number, \"accent\": boolean}]}"
         "}\n\n"
         "규칙: metrics는 정확히 4개, design은 3~5개, risks는 3~5개로 작성하세요. "
+        "caseMatches는 서버 조회 데이터의 design_engine.matched_cases 중 최대 3개만 요약하세요. "
         "floorPlan.rooms 좌표는 x 18~330, y 18~285, w 50~210, h 45~170 범위 안에서 SVG 평면도에 들어가게 작성하세요. "
         "공사비는 만원 또는 억원 단위로 표시하고 확정 견적처럼 단정하지 마세요."
     )
@@ -9010,6 +9265,7 @@ def create_site_plan_report(body: Dict[str, Any]) -> Dict[str, Any]:
 
     pnu = str(body.get("pnu") or "").strip()
     site_data = _collect_site_plan_report_data(pnu, body.get("data"))
+    site_data["design_engine"] = _match_site_report_engine_cases(body)
     fallback = _build_site_plan_report_draft(body, site_data)
     model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip() or "gpt-5.5"
 
@@ -9200,6 +9456,12 @@ def get_data(
     pnu: str,
     format: str = Query("compressed", pattern="^(compressed|lines)$"),
 ) -> Dict[str, Any]:
+    if collection == "cadastral":
+        raise HTTPException(
+            status_code=410,
+            detail="legacy /v1/data/cadastral is disabled; use /v1/geo/land or /v1/tiles/cadastral",
+        )
+
     if collection == "building_info":
         line = _fetch_building_info_line(pnu)
         if not line:

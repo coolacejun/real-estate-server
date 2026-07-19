@@ -33,6 +33,13 @@ _UPDATE_PATTERN_FALLBACKS = ("CH_D002*.geojson", "*.geojson", "*.json")
 _NON_UTF8_GEOJSON_ENCODING = "cp949"
 
 
+def _truthy_env(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "t", "yes", "y", "on"}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="연속지적 GeoJSON -> cadastral_features 적재")
     parser.add_argument("--data-type", default="cadastral")
@@ -51,6 +58,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--truncate-release", action="store_true")
     parser.add_argument("--operation-mode", default="full", choices=("full", "update"))
     parser.add_argument("--tile-change-file", default="")
+    parser.add_argument(
+        "--store-dataset-record",
+        action=argparse.BooleanOptionalAction,
+        default=_truthy_env("CADASTRAL_IMPORT_STORE_DATASET_RECORD", default=False),
+        help=(
+            "Also write cadastral rows to dataset_record for legacy /v1/data/cadastral. "
+            "Disabled by default because cadastral_features serves the active geo/tile APIs."
+        ),
+    )
     parser.add_argument(
         "--op-columns",
         default="작업구분,변경구분,변동구분,갱신구분,op,operation,crud,A8,a8",
@@ -1056,6 +1072,7 @@ def _import_full_file(
     progress_step: int,
     job_id: int | None,
     label_precision: float,
+    store_dataset_record: bool,
 ) -> dict[str, Any]:
     source_file = path.name
     worker_name = threading.current_thread().name
@@ -1086,9 +1103,10 @@ def _import_full_file(
         dataset_rows.clear()
 
     with psycopg.connect(db_url, autocommit=True) as conn:
-        schema_registry = DatasetSchemaRegistry(conn, data_type)
+        schema_registry = DatasetSchemaRegistry(conn, data_type) if store_dataset_record else None
         with conn.transaction():
-            schema_registry.ensure_release_partition(release_id)
+            if schema_registry is not None:
+                schema_registry.ensure_release_partition(release_id)
             mark_worker_running(conn, job_id, source_file, worker_name)
 
         try:
@@ -1106,25 +1124,26 @@ def _import_full_file(
                 if not pnu:
                     continue
 
-                schema_id, payload_values = schema_registry.encode_payload(
-                    dataset_code,
-                    properties,
-                    json_default=_json_default,
-                )
-                dataset_rows.append(
-                    (
-                        release_id,
-                        data_type,
+                if schema_registry is not None:
+                    schema_id, payload_values = schema_registry.encode_payload(
                         dataset_code,
-                        source_file,
-                        row_no,
-                        pnu,
-                        schema_id,
-                        payload_values,
-                        None,
-                        schema_registry.encode_geometry(geometry_dict, json_default=_json_default),
+                        properties,
+                        json_default=_json_default,
                     )
-                )
+                    dataset_rows.append(
+                        (
+                            release_id,
+                            data_type,
+                            dataset_code,
+                            source_file,
+                            row_no,
+                            pnu,
+                            schema_id,
+                            payload_values,
+                            None,
+                            schema_registry.encode_geometry(geometry_dict, json_default=_json_default),
+                        )
+                    )
 
                 label = str(label_raw).strip() if label_raw is not None else ""
                 if geometry_dict:
@@ -1254,9 +1273,10 @@ def main() -> int:
                             f"[INFO] update 중복 파일 스킵: count={len(skipped_files)}, files={preview}{suffix}",
                             flush=True,
                         )
-            schema_registry = DatasetSchemaRegistry(conn, data_type)
+            schema_registry = DatasetSchemaRegistry(conn, data_type) if args.store_dataset_record else None
             with conn.transaction():
-                schema_registry.ensure_release_partition(release_id)
+                if schema_registry is not None:
+                    schema_registry.ensure_release_partition(release_id)
                 update_release_status(conn, release_id, "IMPORTING")
                 if args.job_id is not None:
                     update_job(conn, args.job_id, status="RUNNING", total_files=len(files))
@@ -1265,7 +1285,8 @@ def main() -> int:
             if args.truncate_release:
                 with conn.transaction():
                     conn.execute("DELETE FROM cadastral_features WHERE release_id = %s", (release_id,))
-                    conn.execute("DELETE FROM dataset_record WHERE release_id = %s", (release_id,))
+                    if args.store_dataset_record:
+                        conn.execute("DELETE FROM dataset_record WHERE release_id = %s", (release_id,))
                     conn.execute(
                         """
                         DELETE FROM dataset_import_file
@@ -1294,6 +1315,7 @@ def main() -> int:
                             progress_step,
                             args.job_id,
                             args.label_precision,
+                            args.store_dataset_record,
                         )
                         futures[future] = path
 
@@ -1313,6 +1335,7 @@ def main() -> int:
                     rows: list[tuple[Any, ...]] = []
                     dataset_rows: list[tuple[Any, ...]] = []
                     pending_delete_pnus: set[str] = set()
+                    pending_upsert_pnus: set[str] = set()
                     cleared_pnus: set[str] = set()
                     dataset_code = _dataset_code_from_name(path)
                     dataset_code_aliases = _dataset_code_aliases(dataset_code)
@@ -1325,7 +1348,7 @@ def main() -> int:
                     def flush_rows() -> None:
                         nonlocal inserted_total
                         nonlocal reported_rows
-                        if not rows and not dataset_rows and not pending_delete_pnus:
+                        if not rows and not dataset_rows and not pending_delete_pnus and not pending_upsert_pnus:
                             return
                         with conn.transaction():
                             def collect_existing_bboxes(pnus: list[str]) -> None:
@@ -1347,25 +1370,26 @@ def main() -> int:
                                 delete_pnus = sorted(set(pending_delete_pnus))
                                 if delete_pnus:
                                     collect_existing_bboxes(delete_pnus)
-                                    conn.execute(
-                                        """
-                                        DELETE FROM dataset_record
-                                        WHERE release_id = %s
-                                          AND data_type = %s
-                                          AND (
-                                            dataset_code = ANY(%s)
-                                            OR dataset_code LIKE ANY(%s)
-                                          )
-                                          AND pnu = ANY(%s)
-                                        """,
-                                        (
-                                            release_id,
-                                            data_type,
-                                            dataset_code_aliases,
-                                            dataset_code_like_patterns,
-                                            delete_pnus,
-                                        ),
-                                    )
+                                    if args.store_dataset_record:
+                                        conn.execute(
+                                            """
+                                            DELETE FROM dataset_record
+                                            WHERE release_id = %s
+                                              AND data_type = %s
+                                              AND (
+                                                dataset_code = ANY(%s)
+                                                OR dataset_code LIKE ANY(%s)
+                                              )
+                                              AND pnu = ANY(%s)
+                                            """,
+                                            (
+                                                release_id,
+                                                data_type,
+                                                dataset_code_aliases,
+                                                dataset_code_like_patterns,
+                                                delete_pnus,
+                                            ),
+                                        )
                                     conn.execute(
                                         """
                                         DELETE FROM cadastral_features
@@ -1376,29 +1400,30 @@ def main() -> int:
                                     )
                                     cleared_pnus.update(delete_pnus)
 
-                                upsert_all = {str(row[5]) for row in dataset_rows if row[5]}
+                                upsert_all = set(pending_upsert_pnus)
                                 upsert_pnus = sorted(pnu for pnu in upsert_all if pnu not in cleared_pnus)
                                 if upsert_pnus:
                                     collect_existing_bboxes(upsert_pnus)
-                                    conn.execute(
-                                        """
-                                        DELETE FROM dataset_record
-                                        WHERE release_id = %s
-                                          AND data_type = %s
-                                          AND (
-                                            dataset_code = ANY(%s)
-                                            OR dataset_code LIKE ANY(%s)
-                                          )
-                                          AND pnu = ANY(%s)
-                                        """,
-                                        (
-                                            release_id,
-                                            data_type,
-                                            dataset_code_aliases,
-                                            dataset_code_like_patterns,
-                                            upsert_pnus,
-                                        ),
-                                    )
+                                    if args.store_dataset_record:
+                                        conn.execute(
+                                            """
+                                            DELETE FROM dataset_record
+                                            WHERE release_id = %s
+                                              AND data_type = %s
+                                              AND (
+                                                dataset_code = ANY(%s)
+                                                OR dataset_code LIKE ANY(%s)
+                                              )
+                                              AND pnu = ANY(%s)
+                                            """,
+                                            (
+                                                release_id,
+                                                data_type,
+                                                dataset_code_aliases,
+                                                dataset_code_like_patterns,
+                                                upsert_pnus,
+                                            ),
+                                        )
                                     conn.execute(
                                         """
                                         DELETE FROM cadastral_features
@@ -1427,6 +1452,7 @@ def main() -> int:
                         rows.clear()
                         dataset_rows.clear()
                         pending_delete_pnus.clear()
+                        pending_upsert_pnus.clear()
 
                     for feature in iter_features(path):
                         row_no += 1
@@ -1447,26 +1473,28 @@ def main() -> int:
                                 if len(pending_delete_pnus) >= batch_size:
                                     flush_rows()
                                 continue
+                            pending_upsert_pnus.add(pnu)
                         label = str(label_raw).strip() if label_raw is not None else ""
-                        schema_id, payload_values = schema_registry.encode_payload(
-                            dataset_code,
-                            properties,
-                            json_default=_json_default,
-                        )
-                        dataset_rows.append(
-                            (
-                                release_id,
-                                data_type,
+                        if schema_registry is not None:
+                            schema_id, payload_values = schema_registry.encode_payload(
                                 dataset_code,
-                                path.name,
-                                row_no,
-                                pnu,
-                                schema_id,
-                                payload_values,
-                                None,
-                                schema_registry.encode_geometry(geometry_dict, json_default=_json_default),
+                                properties,
+                                json_default=_json_default,
                             )
-                        )
+                            dataset_rows.append(
+                                (
+                                    release_id,
+                                    data_type,
+                                    dataset_code,
+                                    path.name,
+                                    row_no,
+                                    pnu,
+                                    schema_id,
+                                    payload_values,
+                                    None,
+                                    schema_registry.encode_geometry(geometry_dict, json_default=_json_default),
+                                )
+                            )
 
                         if geometry_dict:
                             bbox = geometry_bbox(geometry_dict)
@@ -1490,10 +1518,14 @@ def main() -> int:
                                     )
                                 )
 
-                        if len(rows) >= batch_size or len(dataset_rows) >= batch_size:
+                        if (
+                            len(rows) >= batch_size
+                            or len(dataset_rows) >= batch_size
+                            or len(pending_upsert_pnus) >= batch_size
+                        ):
                             flush_rows()
 
-                    if rows or dataset_rows or pending_delete_pnus:
+                    if rows or dataset_rows or pending_delete_pnus or pending_upsert_pnus:
                         flush_rows()
 
                     with conn.transaction():
