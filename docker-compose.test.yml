@@ -60,7 +60,6 @@ services:
       - IMPORT_BATCH_SIZE_BUILDING_INFO_UPDATE=4000
       - DATASET_PAYLOAD_VALUES_COMPRESS_LAND_INFO=0
       - LAND_INFO_STORE_SOURCE_METADATA=0
-      - SITE_PLAN_ENGINE_CASES_PATH=/data/site_plan/engine_seed_cases_a_only.json
       - SERVER_LOG_FILE=/var/log/server/server_test.log
       - OPENAI_REPORT_TIMEOUT_SEC=${OPENAI_REPORT_TIMEOUT_SEC:-8}
     volumes:
@@ -71,7 +70,6 @@ services:
       - ./건축물정보:/data/source/building_info:ro
       - ./건물통합정보:/data/source/building_integrated_info:ro
       - ./토지정보:/data/source/land_info:ro
-      - /Users/jun/site_plan/data/full_drawing_audit/engine_seed_cases_a_only.json:/data/site_plan/engine_seed_cases_a_only.json:ro
     depends_on:
       - redis
     ports:

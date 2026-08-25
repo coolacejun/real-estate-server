@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import datetime as dt
+import fcntl
 import fnmatch
 import gzip
 import hashlib
@@ -3149,54 +3150,10 @@ def _fetch_building_info_line(pnu: str) -> str | None:
         except Exception:
             pass
 
-    sql_text = """
-    SELECT
-      COALESCE((SELECT json_agg(line)::text FROM total_building_line_v WHERE pnu = %s), '[]') AS total,
-      COALESCE((SELECT json_agg(line)::text FROM building_line_v WHERE pnu = %s), '[]') AS single,
-      COALESCE((SELECT json_agg(line)::text FROM floor_line_v WHERE pnu = %s), '[]') AS floor,
-      COALESCE((SELECT json_agg(line)::text FROM room_line_v WHERE pnu = %s), '[]') AS room
-    """
-    try:
-        with psycopg.connect(_db_url()) as conn:
-            with conn.cursor() as cur:
-                for candidate_pnu in pnu_candidates:
-                    cur.execute(sql_text, (candidate_pnu, candidate_pnu, candidate_pnu, candidate_pnu))
-                    row = cur.fetchone()
-                    if not row:
-                        continue
-                    total = json.loads(row[0] or "[]")
-                    single = json.loads(row[1] or "[]")
-                    floor = json.loads(row[2] or "[]")
-                    room = json.loads(row[3] or "[]")
-                    if total or single or floor or room:
-                        payload = {
-                            "total": total,
-                            "single": single,
-                            "floor": floor,
-                            "room": room,
-                        }
-                        # Legacy view storage: attempt to attach meta as well.
-                        active_release = _active_release("building_info")
-                        if not active_release:
-                            meta_only = _bucket_irts_meta(payload)  # type: ignore[arg-type]
-                            if meta_only:
-                                enriched = dict(payload)
-                                enriched["meta"] = meta_only
-                                return pnu + json.dumps(enriched, ensure_ascii=False)
-                            return pnu + json.dumps(payload, ensure_ascii=False)
-                        enriched = payload
-                        try:
-                            enriched = _attach_meta(
-                                payload,  # type: ignore[arg-type]
-                                conn=conn,
-                                release_id=int(active_release["id"]),
-                                candidate_pnu=candidate_pnu,
-                            )
-                        except Exception:
-                            enriched = payload
-                        return pnu + json.dumps(enriched, ensure_ascii=False)
-    except Exception:
-        return None
+    # The active release stores building register data in building_info_line (with
+    # dataset_record retained as a compatibility path). Older deployments used four
+    # *_line_v views, but those views are not part of the current schema. A miss in
+    # the authoritative stores is therefore an empty result, not a legacy DB lookup.
     return None
 
 
@@ -5790,6 +5747,197 @@ def _direct_request_is_worker_runnable(request_data: dict[str, Any]) -> bool:
     return status in {"pending", "requested", "claimed", "in_progress"}
 
 
+_DIRECT_REQUEST_RETRYABLE_STATUSES = frozenset({"completed_with_failures", "failed", "server_failed"})
+_DIRECT_REQUEST_RETRY_COPY_FIELDS = (
+    "data_type",
+    "operation_mode",
+    "source",
+    "source_signature",
+    "changed_source_signature",
+    "snapshot_key",
+    "activate",
+    "test_mode",
+    "expected_count",
+    "items",
+    "component_dataset_codes",
+    "component_data_types",
+    "component_status",
+    "source_catalog",
+    "worker_hostname",
+    "worker_version",
+)
+
+
+def _validate_direct_request_id(request_id: str) -> str:
+    normalized = str(request_id or "").strip()
+    if (
+        not normalized
+        or len(normalized) > 180
+        or normalized != request_id
+        or _safe_worker_file_name(normalized, "") != normalized
+    ):
+        raise HTTPException(status_code=400, detail="invalid worker request_id")
+    return normalized
+
+
+def _direct_retry_purpose_key(request_data: dict[str, Any]) -> str:
+    changed_signature = str(request_data.get("changed_source_signature") or "").strip().lower()
+    if changed_signature:
+        return f"changed:{changed_signature}"
+    items = request_data.get("items")
+    cleaned_items = [dict(item) for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    if cleaned_items:
+        return f"items:{_direct_catalog_signature(cleaned_items)}"
+    source_signature = str(request_data.get("source_signature") or "").strip().lower()
+    snapshot_key = str(request_data.get("snapshot_key") or "").strip()
+    return f"source:{source_signature}:{snapshot_key}"
+
+
+def _direct_retry_root_request_id(request_data: dict[str, Any]) -> str:
+    return str(
+        request_data.get("retry_root_request_id")
+        or request_data.get("parent_request_id")
+        or request_data.get("request_id")
+        or ""
+    ).strip()
+
+
+def _direct_request_records(requests_dir: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for path in requests_dir.glob("*.json"):
+        data = _read_json_file(path)
+        if not isinstance(data, dict) or not data:
+            continue
+        request_id = str(data.get("request_id") or "").strip()
+        if not request_id or _safe_worker_file_name(request_id, "") != request_id:
+            continue
+        records.append(data)
+    return records
+
+
+@contextlib.contextmanager
+def _direct_retry_file_lock(requests_dir: Path) -> Any:
+    lock_path = requests_dir / ".retry.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _create_land_info_retry_request(
+    request_id: str,
+    *,
+    worker_id: str,
+    retry_reason: str | None,
+) -> dict[str, Any]:
+    request_id = _validate_direct_request_id(request_id)
+    dirs = _land_info_direct_worker_dirs()
+    with _direct_retry_file_lock(dirs["requests"]):
+        parent_path = _direct_request_path(request_id)
+        parent = _read_json_file(parent_path) or {}
+        if not parent or str(parent.get("request_id") or "").strip() != request_id:
+            raise HTTPException(status_code=404, detail="worker request not found")
+
+        parent_status = str(parent.get("status") or "requested").strip().lower()
+        if parent_status not in _DIRECT_REQUEST_RETRYABLE_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail=f"worker request status is not retryable: {parent_status}",
+            )
+
+        records = _direct_request_records(dirs["requests"])
+        direct_children = [
+            record
+            for record in records
+            if str(record.get("parent_request_id") or "").strip() == request_id
+        ]
+        if len(direct_children) > 1:
+            raise HTTPException(status_code=409, detail="worker request has multiple retry children")
+        if direct_children:
+            existing = direct_children[0]
+            return {
+                "created": False,
+                "request_created": False,
+                "request_id": existing.get("request_id"),
+                "reason": "existing_retry",
+                "request": existing,
+            }
+
+        root_request_id = _direct_retry_root_request_id(parent) or request_id
+        purpose_key = _direct_retry_purpose_key(parent)
+        for record in records:
+            if not record.get("parent_request_id") or not _direct_request_is_worker_runnable(record):
+                continue
+            same_chain = _direct_retry_root_request_id(record) == root_request_id
+            same_purpose = _direct_retry_purpose_key(record) == purpose_key
+            if same_chain or same_purpose:
+                return {
+                    "created": False,
+                    "request_created": False,
+                    "request_id": record.get("request_id"),
+                    "reason": "existing_runnable_retry",
+                    "request": record,
+                }
+
+        try:
+            retry_seq = int(parent.get("retry_seq") or 0) + 1
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=409, detail="worker request has invalid retry_seq")
+        if retry_seq <= 0:
+            raise HTTPException(status_code=409, detail="worker request has invalid retry_seq")
+
+        retry_digest = hashlib.sha256(
+            f"{root_request_id}\n{request_id}\n{retry_seq}\n{purpose_key}".encode("utf-8")
+        ).hexdigest()[:20]
+        retry_request_id = f"land_info_retry_{retry_digest}"
+        retry_path = _direct_request_path(retry_request_id)
+        if retry_path.exists():
+            existing = _read_json_file(retry_path) or {}
+            if str(existing.get("parent_request_id") or "").strip() == request_id:
+                return {
+                    "created": False,
+                    "request_created": False,
+                    "request_id": retry_request_id,
+                    "reason": "existing_retry",
+                    "request": existing,
+                }
+            raise HTTPException(status_code=409, detail="retry request_id collision")
+
+        now = _worker_now_iso()
+        request_data = {
+            key: parent[key]
+            for key in _DIRECT_REQUEST_RETRY_COPY_FIELDS
+            if key in parent
+        }
+        request_data.update(
+            {
+                "request_id": retry_request_id,
+                "created_at": now,
+                "updated_at": now,
+                "status": "requested",
+                "force_redownload": True,
+                "parent_request_id": request_id,
+                "retry_root_request_id": root_request_id,
+                "retry_seq": retry_seq,
+                "retry_source_status": parent_status,
+                "retry_requested_by_worker": worker_id,
+                "created_by_worker": worker_id,
+            }
+        )
+        if retry_reason:
+            request_data["retry_reason"] = retry_reason
+        _write_direct_json(retry_path, request_data)
+        return {
+            "created": True,
+            "request_created": True,
+            "request_id": retry_request_id,
+            "reason": "retry_created",
+            "request": request_data,
+        }
+
+
 def _land_info_direct_worker_status() -> dict[str, Any]:
     dirs = _land_info_direct_worker_dirs()
     heartbeats: list[dict[str, Any]] = []
@@ -5865,6 +6013,10 @@ def _land_info_direct_worker_status() -> dict[str, Any]:
             {
                 "request_id": request_id,
                 "status": data.get("status") or "requested",
+                "force_redownload": bool(data.get("force_redownload", False)),
+                "parent_request_id": data.get("parent_request_id"),
+                "retry_root_request_id": data.get("retry_root_request_id"),
+                "retry_seq": data.get("retry_seq"),
                 "expected_count": expected_count,
                 "uploaded_count": data.get("uploaded_count"),
                 "failed_count": data.get("failed_count"),
@@ -6106,6 +6258,36 @@ def worker_land_info_ensure_update(
             "source_signature": source_signature,
             "snapshot_key": snapshot_key,
         }
+    )
+
+
+@app.post("/v1/worker/land-info/requests/{request_id}/retry")
+def worker_land_info_retry_request(
+    request_id: str,
+    body: Dict[str, Any] | None = None,
+    x_worker_id: str | None = Header(default=None),
+    x_worker_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    worker_id = _require_land_info_worker(x_worker_id, x_worker_token)
+    payload = dict(body or {})
+    unknown_fields = sorted(set(payload) - {"reason"})
+    if unknown_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported retry fields: {', '.join(unknown_fields)}",
+        )
+    reason_value = payload.get("reason")
+    if reason_value is not None and not isinstance(reason_value, str):
+        raise HTTPException(status_code=400, detail="reason must be a string")
+    retry_reason = str(reason_value or "").strip() or None
+    if retry_reason and len(retry_reason) > 500:
+        raise HTTPException(status_code=400, detail="reason must be at most 500 characters")
+    return ok(
+        _create_land_info_retry_request(
+            request_id,
+            worker_id=worker_id,
+            retry_reason=retry_reason,
+        )
     )
 
 

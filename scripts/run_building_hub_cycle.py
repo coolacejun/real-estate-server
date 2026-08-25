@@ -205,6 +205,14 @@ def prepare_visible_staging(base_dir: Path, visible_source_dir: Path, month: str
     if not source_dir.is_dir():
         raise RuntimeError(f"staging source directory is missing: {source_dir}")
 
+    direct_api_source = os.getenv("BUILDING_HUB_API_SOURCE_PATH", "").strip()
+    if direct_api_source:
+        for task_code in hub.TARGET_TASKS:
+            source = source_dir / hub.expected_filename_for_task(task_code)
+            if not source.exists():
+                raise RuntimeError(f"staged file is missing: {source}")
+        return source_dir, direct_api_source
+
     stage_name = f"hub_staging_full_{month.replace('-', '_')}"
     target_dir = visible_source_dir / stage_name
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -231,8 +239,10 @@ def cleanup_source_files(base_dir: Path, visible_source_dir: Path, month: str, h
         ("raw_dir", base_dir / "raw" / month),
         ("extracted_dir", base_dir / "extracted" / month),
         ("staging_dir", base_dir / "staging" / "full"),
-        ("visible_stage_dir", host_stage if host_stage is not None else visible_source_dir / stage_name),
+        ("visible_stage_dir", visible_source_dir / stage_name),
     ]
+    if host_stage is not None and host_stage != base_dir / "staging" / "full":
+        targets.append(("host_stage_dir", host_stage))
     result: dict[str, Any] = {"removed": [], "missing": [], "failed": []}
     for label, target in targets:
         path = target.resolve()
@@ -660,6 +670,22 @@ def main() -> int:
                     latest_month,
                 )
             run["status"] = "skipped_already_current"
+            return 0
+
+        min_free_gb = max(0.0, float(os.getenv("BUILDING_HUB_MIN_FREE_GB", "0") or 0))
+        disk_usage = shutil.disk_usage(base_dir)
+        free_gb = disk_usage.free / float(1024 ** 3)
+        run["disk_space"] = {
+            "free_gb": round(free_gb, 2),
+            "min_free_gb": min_free_gb,
+        }
+        if min_free_gb and free_gb < min_free_gb:
+            run["status"] = "blocked_low_disk"
+            print(
+                "[cycle] import deferred: "
+                f"free_disk={free_gb:.1f}GB required={min_free_gb:.1f}GB",
+                flush=True,
+            )
             return 0
 
         run_fetch_script(args)

@@ -203,7 +203,35 @@ Response when a request is created or already pending:
 
 The worker can pass `--skip-update-check` to bypass this endpoint and only poll existing server requests.
 
-### 3. Poll Next Request
+### 3. Retry a Failed Request
+
+```http
+POST /v1/worker/land-info/requests/{request_id}/retry
+```
+
+Request (the body may also be empty):
+
+```json
+{
+  "reason": "operator requested retry"
+}
+```
+
+Only `completed_with_failures`, `failed`, and `server_failed` requests are retryable. The API leaves the failed parent JSON unchanged and creates a new worker-runnable request containing:
+
+```json
+{
+  "status": "requested",
+  "force_redownload": true,
+  "parent_request_id": "land_info_update_54d02241715e6e65",
+  "retry_root_request_id": "land_info_update_54d02241715e6e65",
+  "retry_seq": 1
+}
+```
+
+Repeating the same call returns the existing child with `created=false`. To continue a failed retry chain, retry the latest failed child. A runnable retry for the same chain or source purpose prevents creation of another branch.
+
+### 4. Poll Next Request
 
 ```http
 GET /v1/worker/land-info/requests/next?worker_id=NUCBOX_M6
@@ -252,7 +280,7 @@ Response with request:
 }
 ```
 
-### 3. Claim Request
+### 5. Claim Request
 
 ```http
 POST /v1/worker/land-info/requests/{request_id}/claim
@@ -287,7 +315,7 @@ If another worker claimed it:
 }
 ```
 
-### 4. File Status
+### 6. File Status
 
 ```http
 POST /v1/worker/land-info/requests/{request_id}/files/{file_id}/status
@@ -333,7 +361,7 @@ processed
 failed
 ```
 
-### 5. Init Upload
+### 7. Init Upload
 
 ```http
 POST /v1/worker/land-info/uploads/init
@@ -379,7 +407,7 @@ If upload already completed:
 }
 ```
 
-### 6. Upload Chunk
+### 8. Upload Chunk
 
 ```http
 PUT /v1/worker/land-info/uploads/{upload_id}/chunks/{chunk_index}
@@ -408,7 +436,7 @@ Rules:
 - Worker should skip chunks listed in `received_chunks`.
 - Worker should retry transient HTTP/network errors with backoff.
 
-### 7. Complete Upload
+### 9. Complete Upload
 
 ```http
 POST /v1/worker/land-info/uploads/{upload_id}/complete
@@ -440,7 +468,7 @@ Response:
 
 The worker may delete its local ZIP when status is `accepted` or later.
 
-### 8. Complete Request
+### 10. Complete Request
 
 ```http
 POST /v1/worker/land-info/requests/{request_id}/complete
