@@ -1,5 +1,14 @@
 http:
   routers:
+    platform-api:
+      rule: >-
+        (Host(`building-land.com`) || Host(`www.building-land.com`)) &&
+        (PathPrefix(`/api/mobile/v1`) || Path(`/api/v1/environment-analysis`) ||
+        (PathPrefix(`/api/report-archive`) && HeaderRegexp(`Authorization`, `(?i)^Bearer\\s+.+`)))
+      service: api
+      priority: 200
+      entryPoints:
+        - web
     homepage:
       rule: Host(`building-land.com`) || Host(`www.building-land.com`)
       service: homepage

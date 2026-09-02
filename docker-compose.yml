@@ -73,6 +73,24 @@ services:
       - DATASET_PAYLOAD_VALUES_COMPRESS_LAND_INFO=0
       - LAND_INFO_STORE_SOURCE_METADATA=0
       - KAKAO_REST_API_KEY=${KAKAO_REST_API_KEY:-}
+      - APP_ENV=${APP_ENV:-production}
+      - MOBILE_OAUTH_CALLBACK_BASE_URL=${MOBILE_OAUTH_CALLBACK_BASE_URL:-https://building-land.com}
+      - MOBILE_OAUTH_REDIRECT_ALLOWLIST=${MOBILE_OAUTH_REDIRECT_ALLOWLIST:-buildingland://oauth/callback}
+      - KAKAO_OAUTH_CLIENT_ID=${KAKAO_OAUTH_CLIENT_ID:-}
+      - KAKAO_OAUTH_CLIENT_SECRET=${KAKAO_OAUTH_CLIENT_SECRET:-}
+      - NAVER_OAUTH_CLIENT_ID=${NAVER_OAUTH_CLIENT_ID:-}
+      - NAVER_OAUTH_CLIENT_SECRET=${NAVER_OAUTH_CLIENT_SECRET:-}
+      - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID:-}
+      - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      - STORE_VERIFIER_MODE=${STORE_VERIFIER_MODE:-production}
+      - APPLE_BUNDLE_ID=${APPLE_BUNDLE_ID:-}
+      - APPLE_SHARED_SECRET=${APPLE_SHARED_SECRET:-}
+      - APPLE_ROOT_CA_FILE=/run/secrets/apple-root-ca.pem
+      - GOOGLE_PLAY_PACKAGE_NAME=${GOOGLE_PLAY_PACKAGE_NAME:-}
+      - GOOGLE_PLAY_SERVICE_ACCOUNT_FILE=/run/secrets/google-play-service-account.json
+      - PLATFORM_INTERNAL_SERVICE_TOKEN=${PLATFORM_INTERNAL_SERVICE_TOKEN:-}
+      - REPORT_ASSET_DIR=/data/report-assets
+      - ENVIRONMENT_DATA_DIR=/data/environment
     volumes:
       - ./data/uploads:/data/uploads
       - ./scripts:/scripts:ro
@@ -82,9 +100,15 @@ services:
       - ./건물통합정보:/data/source/building_integrated_info:ro
       - ./토지정보:/data/source/land_info:ro
       - ${LAND_INFO_WORKER_HOST_DIR:-/Volumes/land-info-worker}:/worker/land-info-worker:ro
+      - ${REPORT_ASSET_HOST_DIR:-./data/report-assets}:/data/report-assets
+      - ${ENVIRONMENT_DATA_HOST_DIR:-./web/data}:/data/environment:ro
+      - ${APPLE_ROOT_CA_HOST_FILE:-/dev/null}:/run/secrets/apple-root-ca.pem:ro
+      - ${GOOGLE_PLAY_SERVICE_ACCOUNT_HOST_FILE:-/dev/null}:/run/secrets/google-play-service-account.json:ro
     depends_on:
-      - postgres
-      - redis
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
     restart: unless-stopped
 
   web:
@@ -98,10 +122,13 @@ services:
       # 같은 호스트의 api 컨테이너로 직접 프록시 (외부 왕복 방지)
       - APP_SERVER_BASE_URL=http://api:8000
       - AUTH_DB_PATH=/data/web/auth.sqlite3
+      - PLATFORM_API_BASE_URL=http://api:8000
+      - PLATFORM_INTERNAL_SERVICE_TOKEN=${PLATFORM_INTERNAL_SERVICE_TOKEN:-}
     volumes:
       - ./data/web:/data/web
     depends_on:
-      - api
+      api:
+        condition: service_started
     restart: unless-stopped
 
   building-hub-sync:
@@ -301,7 +328,32 @@ services:
       - pgdata:/var/lib/postgresql/data
       # Auto-apply schema/migrations on first init of the volume.
       - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     restart: unless-stopped
+
+  migrate:
+    image: postgres:16
+    env_file: .env
+    environment:
+      - PGPASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - ./db:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - sh
+      - -lc
+      - |
+        set -eu
+        for migration in /migrations/[0-9][0-9][0-9]_*.sql; do
+          psql -h postgres -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -v ON_ERROR_STOP=1 -f "$${migration}"
+        done
+    restart: "no"
 
   redis:
     image: redis:7

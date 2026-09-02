@@ -1,0 +1,19 @@
+{
+  "rendererProfile": "ios-a4-v1",
+  "report": {
+    "schemaVersion": 1,
+    "rendererVersion": "ios-a4-v1",
+    "mappingVersion": "golden-v1",
+    "reportId": "golden-ios-a4-v1",
+    "title": "건물과 토지 iOS 표준 보고서",
+    "address": "서울특별시 종로구 세종대로 1",
+    "includedItems": ["cover", "opinion"],
+    "officeInfo": {},
+    "reportTheme": "navy",
+    "pages": [
+      {"pageKey": "cover", "layout": "cover", "title": "건물과 토지 iOS 표준 보고서", "address": "서울특별시 종로구 세종대로 1"},
+      {"pageKey": "opinion", "layout": "opinion", "title": "중개 의견", "opinionText": "표준 계약 fixture는 줄바꿈, 한글, 숫자 12345 및 특수문자 & < >를 포함합니다."}
+    ]
+  },
+  "expected": {"contentHash": "d7d6fe653e0bffac3d1858917e5f129485f52730f6abf5a61583e5e4104b786f", "minimumPdfBytes": 1800, "minimumPages": 2}
+}

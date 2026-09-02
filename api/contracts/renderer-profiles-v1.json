@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "profiles": {
+    "web-a4-v1": {"paper": "A4", "accent": "#16324f", "marginPoints": 38, "fontSizePoints": 9.5},
+    "ios-a4-v1": {"paper": "A4", "accent": "#173d68", "marginPoints": 40, "fontSizePoints": 10},
+    "android-a4-v1": {"paper": "A4", "accent": "#174766", "marginPoints": 36, "fontSizePoints": 9.5}
+  },
+  "legacyAliases": {"web-a4-canonical-v1": "web-a4-v1"}
+}

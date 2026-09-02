@@ -1,0 +1,19 @@
+{
+  "rendererProfile": "web-a4-v1",
+  "report": {
+    "schemaVersion": 1,
+    "rendererVersion": "web-a4-v1",
+    "mappingVersion": "golden-v1",
+    "reportId": "golden-web-a4-v1",
+    "title": "건물과 토지 웹 표준 보고서",
+    "address": "서울특별시 종로구 세종대로 1",
+    "includedItems": ["cover", "property"],
+    "officeInfo": {"name": "건물과 토지 공인중개사사무소"},
+    "reportTheme": "navy",
+    "pages": [
+      {"pageKey": "cover", "layout": "cover", "title": "건물과 토지 웹 표준 보고서", "address": "서울특별시 종로구 세종대로 1"},
+      {"pageKey": "property", "layout": "property-report", "title": "대상 부동산 요약", "reportRows": [[{"label": "소재지", "value": "서울특별시 종로구 세종대로 1"}], [{"label": "검증 문장", "value": "긴 보고서의 자동 페이지 분할과 한글 글꼴을 확인합니다. × 160"}]]}
+    ]
+  },
+  "expected": {"contentHash": "f2bf9ec076d858ee0afe4bed720f1a927ce47c7a5cea1249e769f4b01cc738c0", "minimumPdfBytes": 1800, "minimumPages": 2}
+}

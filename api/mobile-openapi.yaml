@@ -1,0 +1,326 @@
+openapi: 3.1.0
+info:
+  title: Building Land Mobile and Shared Platform API
+  version: 1.0.0
+  description: >-
+    Public mobile authentication, store, canonical report, archive and environment
+    contracts. Runtime documentation is also served from /openapi.json.
+servers:
+  - url: https://building-land.com
+paths:
+  /api/mobile/v1/auth/oauth/start:
+    post:
+      summary: Begin provider OAuth with PKCE S256
+      security:
+        - {}
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OAuthStartRequest'
+      responses:
+        '200':
+          description: Provider authorization URL and one-time state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state, authorizationUrl]
+                properties:
+                  state: {type: string}
+                  authorizationUrl: {type: string, format: uri}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/mobile/v1/auth/oauth/callback/{provider}:
+    get:
+      summary: Complete provider OAuth and redirect with a one-time exchange code
+      parameters:
+        - {name: provider, in: path, required: true, schema: {type: string, enum: [kakao, naver, google]}}
+        - {name: state, in: query, required: true, schema: {type: string}}
+        - {name: code, in: query, required: true, schema: {type: string}}
+      responses:
+        '302': {description: Redirect to the exact allowlisted mobile URI}
+        '400': {$ref: '#/components/responses/ValidationError'}
+  /api/mobile/v1/auth/token:
+    post:
+      summary: Exchange the one-time code and PKCE verifier for opaque tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, codeVerifier, deviceId]
+              properties:
+                code: {type: string}
+                codeVerifier: {type: string, minLength: 43, maxLength: 128}
+                deviceId: {type: string, minLength: 16, maxLength: 160}
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/mobile/v1/auth/refresh:
+    post:
+      summary: Rotate a refresh token; replay revokes its whole family
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken, deviceId]
+              properties:
+                refreshToken: {type: string}
+                deviceId: {type: string, minLength: 16, maxLength: 160}
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/mobile/v1/auth/logout:
+    post:
+      summary: Revoke the current token family
+      security: [{bearerAuth: []}]
+      responses:
+        '204': {description: Revoked}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/mobile/v1/me:
+    get:
+      summary: Return the shared user, identities, entitlements and credit buckets
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Profile'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/mobile/v1/store/catalog:
+    get:
+      summary: Return exact current and retired SKU policy plus account binding token
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: platform, in: query, required: true, schema: {type: string, enum: [ios, android]}}
+      responses:
+        '200':
+          description: Store products
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accountToken, products]
+                properties:
+                  accountToken: {type: string, format: uuid}
+                  products:
+                    type: array
+                    items: {$ref: '#/components/schemas/StoreProduct'}
+  /api/mobile/v1/store/verify:
+    post:
+      summary: Verify a consumable purchase and grant paid credits exactly once
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/StoreRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/StoreResult'}
+        '409': {description: Transaction belongs to another account or product}
+        '410': {description: Product is retired}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/mobile/v1/store/restore:
+    post:
+      summary: Restore the retired remove_ads_monthly entitlement without credit grant
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/StoreRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/StoreResult'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/mobile/v1/reports/preview:
+    post:
+      summary: Render an uncharged canonical preview PDF
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReportRenderRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Pdf'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/mobile/v1/reports/final:
+    post:
+      summary: Debit free first, render, archive canonical data, and return transient PDF bytes
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/ReportRenderRequest'}
+                - type: object
+                  required: [requestId]
+                  properties:
+                    requestId: {type: string, minLength: 8, maxLength: 160}
+                    contentHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+      responses:
+        '200': {$ref: '#/components/responses/Pdf'}
+        '402': {description: No free or paid credits remain}
+        '409': {description: Idempotency conflict or request already processing}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/report-archive:
+    get:
+      summary: List the authenticated user's canonical report archives
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Archive metadata; never persisted PDF binaries
+  /api/report-archive/content:
+    get:
+      summary: Regenerate PDF or HTML from canonical JSON and referenced assets
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: id, in: query, required: true, schema: {type: string, format: uuid}}
+        - {name: format, in: query, required: false, schema: {type: string, enum: [pdf, html], default: pdf}}
+      responses:
+        '200': {description: Regenerated private content}
+        '404': {description: Archive not found for this user}
+        '410': {description: A referenced report asset is unavailable}
+  /api/v1/environment-analysis:
+    post:
+      summary: Produce the canonical environment-analysis rows from mounted authoritative datasets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/EnvironmentRequest'}
+      responses:
+        '200':
+          description: Versioned full or partial result with per-category errors and sources
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  schemas:
+    CreditSummary:
+      type: object
+      required: [freeRemaining, paidRemaining, availableCredits]
+      properties:
+        freeRemaining: {type: integer, minimum: 0}
+        paidRemaining: {type: integer, minimum: 0}
+        availableCredits: {type: integer, minimum: 0}
+    Profile:
+      type: object
+      required: [authenticated, user, socialAccounts, creditSummary, storeEntitlements]
+      properties:
+        authenticated: {type: boolean, const: true}
+        user: {type: object}
+        socialAccounts: {type: array, items: {type: object}}
+        creditSummary: {$ref: '#/components/schemas/CreditSummary'}
+        storeEntitlements: {type: array, items: {type: object}}
+        accessToken: {type: string}
+        refreshToken: {type: string}
+    OAuthStartRequest:
+      type: object
+      required: [provider, codeChallenge, redirectUri]
+      properties:
+        provider: {type: string, enum: [kakao, naver, google]}
+        codeChallenge: {type: string, minLength: 43, maxLength: 128}
+        redirectUri: {type: string}
+        linkAccount: {type: boolean, default: false}
+    StoreProduct:
+      type: object
+      required: [platform, productId, kind, credits, enabled, version]
+      properties:
+        platform: {type: string, enum: [ios, android]}
+        productId:
+          type: string
+          enum: [buildingland.report_credits_10, buildingland.report_credits_30, buildingland.report_credits_50, buildingland.report_credits_60, buildingland.report_credits_90]
+        kind: {type: string, const: consumable}
+        credits: {type: integer}
+        enabled: {type: boolean}
+        version: {type: integer}
+    StoreRequest:
+      type: object
+      required: [platform, productId, verificationData, restored]
+      properties:
+        platform: {type: string, enum: [ios, android]}
+        productId: {type: string}
+        verificationData: {type: string, maxLength: 2097152}
+        transactionId: {type: string}
+        restored: {type: boolean}
+    ReportRenderRequest:
+      type: object
+      required: [report]
+      properties:
+        rendererProfile: {type: string, enum: [web-a4-v1, ios-a4-v1, android-a4-v1]}
+        report: {$ref: './contracts/canonical-report-v1.schema.json'}
+    EnvironmentRequest:
+      type: object
+      required: [location, address, radiusProfile, calculationVersion]
+      properties:
+        location:
+          type: object
+          required: [lat, lng, crs]
+          properties:
+            lat: {type: number, minimum: -90, maximum: 90}
+            lng: {type: number, minimum: -180, maximum: 180}
+            crs: {type: string, const: 'EPSG:4326'}
+        address:
+          type: object
+          properties:
+            parcel: {type: string}
+            road: {type: string}
+        parcelId: {type: string, pattern: '^[0-9]{19}$'}
+        radiusProfile: {type: string, const: web-v1}
+        calculationVersion: {type: string, const: environment-web-v1}
+  responses:
+    Profile:
+      description: Shared account profile
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Profile'}
+    Session:
+      description: Shared profile with newly issued opaque tokens
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Profile'}
+    StoreResult:
+      description: Exactly-once purchase or entitlement result
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              transactionId: {type: string, format: uuid}
+              productId: {type: string}
+              creditsGranted: {type: integer}
+              alreadyProcessed: {type: boolean}
+              creditSummary: {$ref: '#/components/schemas/CreditSummary'}
+    Pdf:
+      description: Transient generated PDF with content and per-response byte hashes in headers
+      headers:
+        X-Report-Content-Hash: {schema: {type: string}}
+        X-Report-Artifact-Sha256: {schema: {type: string}}
+        X-Report-Renderer-Profile: {schema: {type: string}}
+        X-Report-Renderer-Version: {schema: {type: string}}
+      content:
+        application/pdf:
+          schema: {type: string, format: binary}
+    Unauthorized:
+      description: Missing, expired or replayed credentials
+    ValidationError:
+      description: Request contract validation failed
+    TooLarge:
+      description: Request or image asset exceeds configured limits
+    Unavailable:
+      description: Required database, credentials, verifier, renderer, or dataset is unavailable

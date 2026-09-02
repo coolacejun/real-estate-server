@@ -157,14 +157,7 @@ SQL
 export PGPASSWORD="$POSTGRES_PASSWORD"
 
 echo "[local-api] applying migrations"
-for f in \
-  "$ROOT_DIR/db/001_cadastral_admin.sql" \
-  "$ROOT_DIR/db/002_cadastral_label_point.sql" \
-  "$ROOT_DIR/db/003_release_data_type_and_building_info.sql" \
-  "$ROOT_DIR/db/004_dataset_record.sql" \
-  "$ROOT_DIR/db/005_import_worker_progress.sql" \
-  "$ROOT_DIR/db/006_dataset_storage_optimization.sql" \
-  "$ROOT_DIR/db/007_dataset_pnu_kv.sql"
+for f in "$ROOT_DIR"/db/[0-9][0-9][0-9]_*.sql
 do
   psql -h "$LOCAL_PG_HOST" -p "$LOCAL_PG_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f "$f" >/dev/null
 done

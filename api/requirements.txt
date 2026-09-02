@@ -5,3 +5,6 @@ redis
 python-multipart
 Pillow
 ijson
+reportlab>=4.2,<5
+cryptography>=50,<51
+google-auth[requests]>=2.35,<3

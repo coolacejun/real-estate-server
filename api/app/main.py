@@ -35,8 +35,12 @@ from psycopg import sql
 from logging.handlers import RotatingFileHandler
 
 from .pnu_aliases import pnu_query_candidates as _build_pnu_query_candidates
+from .platform import router as platform_router
+from .platform.body_limit import RequestBodyLimitMiddleware
 
 app = FastAPI(title="building-land API", version="1.2.0")
+app.add_middleware(RequestBodyLimitMiddleware)
+app.include_router(platform_router)
 APP_DIR = Path(__file__).resolve().parent
 ADMIN_STATIC_DIR = APP_DIR / "static" / "admin"
 SERVER_LOG_FILE = Path(os.getenv("SERVER_LOG_FILE", "/data/uploads/logs/server.log"))

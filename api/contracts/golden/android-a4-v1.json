@@ -1,0 +1,19 @@
+{
+  "rendererProfile": "android-a4-v1",
+  "report": {
+    "schemaVersion": 1,
+    "rendererVersion": "android-a4-v1",
+    "mappingVersion": "golden-v1",
+    "reportId": "golden-android-a4-v1",
+    "title": "건물과 토지 Android 표준 보고서",
+    "address": "서울특별시 종로구 세종대로 1",
+    "includedItems": ["cover", "disclosure"],
+    "officeInfo": {},
+    "reportTheme": "navy",
+    "pages": [
+      {"pageKey": "cover", "layout": "cover", "title": "건물과 토지 Android 표준 보고서", "address": "서울특별시 종로구 세종대로 1"},
+      {"pageKey": "disclosure", "layout": "broker-disclosure", "title": "중개대상물 확인", "brokerRows": [[{"label": "확인 상태", "value": "공부 및 현장 확인 필요"}], [{"label": "기준 버전", "value": "golden-v1"}]]}
+    ]
+  },
+  "expected": {"contentHash": "44f11700ad824a2d3a34effa40fb1a20d813efb52df1ff61a17cd1331bdf7af8", "minimumPdfBytes": 1800, "minimumPages": 2}
+}
