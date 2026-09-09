@@ -306,7 +306,8 @@ async def mobile_report_preview(
     _session(authorization)
     payload = _body(await request.json())
     canonical = validate_canonical_report(
-        payload.get("report"), requested_profile=payload.get("rendererProfile")
+        payload.get("report"), requested_profile=payload.get("rendererProfile"),
+        expected_content_hash=payload.get("contentHash"),
     )
     data = render_pdf(_settings(), canonical)
     return _pdf_response(data, canonical)
@@ -396,7 +397,12 @@ def mobile_archive_content(
 @router.post("/api/v1/environment-analysis")
 async def environment_analysis(request: Request) -> dict[str, Any]:
     _rate_limit(request, "environment", 60, 60)
-    return analyze_environment(_settings(), await request.json())
+    settings = _settings()
+    if not settings.environment_analysis_enabled:
+        raise HTTPException(status_code=503, detail="environment analysis is disabled")
+    from starlette.concurrency import run_in_threadpool
+
+    return await run_in_threadpool(analyze_environment, settings, await request.json())
 
 
 @router.post("/api/internal/v1/web/accounts/resolve")

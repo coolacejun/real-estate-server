@@ -33,7 +33,7 @@ os.environ.setdefault("MOBILE_OAUTH_CALLBACK_BASE_URL", "https://building-land.t
 from app.main import app
 from app.platform.config import get_settings
 from app.platform.oauth import ProviderIdentity, fetch_provider_identity
-from app.platform.reports import begin_final_usage, render_pdf, validate_canonical_report
+from app.platform.reports import begin_final_usage, fail_final_usage, render_pdf, validate_canonical_report
 from app.platform.repository import new_id
 from app.platform.security import sha256_text
 from app.platform.store import (
@@ -59,6 +59,8 @@ class MobilePlatformContractTest(unittest.TestCase):
         cls._write_environment_fixture(cls.environment)
         os.environ["REPORT_ASSET_DIR"] = str(cls.assets)
         os.environ["ENVIRONMENT_DATA_DIR"] = str(cls.environment)
+        cls.previous_environment_enabled = os.environ.get("ENVIRONMENT_ANALYSIS_ENABLED")
+        os.environ["ENVIRONMENT_ANALYSIS_ENABLED"] = "true"
         get_settings.cache_clear()
         cls.database_url = os.environ["DATABASE_URL"]
         cls.client = TestClient(app, follow_redirects=False)
@@ -67,6 +69,11 @@ class MobilePlatformContractTest(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.client.close()
         cls.temp_dir.cleanup()
+        if cls.previous_environment_enabled is None:
+            os.environ.pop("ENVIRONMENT_ANALYSIS_ENABLED", None)
+        else:
+            os.environ["ENVIRONMENT_ANALYSIS_ENABLED"] = cls.previous_environment_enabled
+        get_settings.cache_clear()
 
     def setUp(self) -> None:
         with psycopg.connect(self.database_url) as connection:
@@ -943,6 +950,80 @@ class MobilePlatformContractTest(unittest.TestCase):
         self.assertEqual(partial.status_code, 200, partial.text)
         self.assertTrue(partial.json()["partial"])
         self.assertEqual(partial.json()["categories"]["parks"]["status"], "error")
+
+    def test_v3_preview_final_retry_archive_keep_one_central_debit(self) -> None:
+        from test_canonical_v3 import v3_report
+
+        user_id, _, headers = self._create_user(free=1)
+        report = v3_report()
+        canonical = validate_canonical_report(report)
+        request = {"report": report, "requestId": "v3-central-final-0001", "contentHash": canonical.content_hash}
+        preview = self.client.post("/api/mobile/v1/reports/preview", headers=headers, json=request)
+        self.assertEqual(preview.status_code, 200, preview.text[:300])
+        self.assertEqual(self._credit_summary(headers)["freeRemaining"], 1)
+        final = self.client.post("/api/mobile/v1/reports/final", headers=headers, json=request)
+        self.assertEqual(final.status_code, 200, final.text[:300])
+        archive_id = final.headers["x-report-archive-id"]
+        retry = self.client.post("/api/mobile/v1/reports/final", headers=headers, json=request)
+        regenerated = self.client.get(f"/api/report-archive/content?id={archive_id}&format=pdf", headers=headers)
+        for response in (preview, final, retry, regenerated):
+            self.assertEqual(response.status_code, 200, response.text[:300])
+            self.assertEqual(response.headers["x-report-content-hash"], canonical.content_hash)
+            self.assertEqual(response.headers["x-report-renderer-version"], "web-a4-canonical-v3")
+            self.assertEqual(response.headers["x-report-artifact-sha256"], hashlib.sha256(response.content).hexdigest())
+        self.assertEqual(retry.headers["x-report-archive-id"], archive_id)
+        self.assertEqual(self._credit_summary(headers)["availableCredits"], 0)
+        with psycopg.connect(self.database_url) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT count(*), sum(delta) FROM platform_credit_ledger WHERE user_id = %s AND reason = 'report_final'",
+                (user_id,),
+            ).fetchone(), (1, -1))
+            stored = connection.execute(
+                "SELECT canonical_report, asset_manifest FROM platform_report_archives WHERE id = %s", (archive_id,),
+            ).fetchone()
+        self.assertNotIn("data:image", json.dumps(stored[0]))
+        self.assertEqual(len(stored[1]), 3)
+        photo = next(page for page in stored[0]["pages"] if page["pageKey"] == "environment")["environmentPhoto"]
+        self.assertTrue(photo["src"].startswith("asset://"))
+        _, _, other_headers = self._create_user()
+        self.assertEqual(self.client.get(f"/api/report-archive/content?id={archive_id}&format=pdf", headers=other_headers).status_code, 404)
+
+    def test_v3_concurrent_reservation_failure_and_retry_are_idempotent(self) -> None:
+        from test_canonical_v3 import v3_report
+
+        user_id, _, headers = self._create_user(free=1)
+        canonical = validate_canonical_report(v3_report())
+        request_id = "v3-central-concurrent-0001"
+
+        def reserve(_):
+            try:
+                return begin_final_usage(get_settings(), user_id=user_id, request_id=request_id, canonical=canonical)
+            except HTTPException as exc:
+                return exc.status_code
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(reserve, range(8)))
+        winners = [result for result in results if isinstance(result, dict)]
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(results.count(409), 7)
+        usage_id = str(winners[0]["usage"]["id"])
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(lambda _: fail_final_usage(get_settings(), usage_id, "test_failure"), range(4)))
+        self.assertEqual(self._credit_summary(headers)["freeRemaining"], 1)
+        final = self.client.post("/api/mobile/v1/reports/final", headers=headers,
+                                 json={"report": canonical.report, "requestId": request_id})
+        self.assertEqual(final.status_code, 200, final.text[:300])
+        with psycopg.connect(self.database_url) as connection:
+            rows = connection.execute(
+                "SELECT reason, count(*), sum(delta) FROM platform_credit_ledger WHERE user_id = %s GROUP BY reason",
+                (user_id,),
+            ).fetchall()
+            usages = connection.execute(
+                "SELECT status, attempt_count FROM platform_report_usages WHERE id = %s", (usage_id,),
+            ).fetchall()
+        self.assertEqual(set(rows), {("report_final", 2, -2), ("report_failure_refund", 1, 1)})
+        self.assertEqual(usages, [("completed", 2)])
+        self.assertEqual(self._credit_summary(headers)["freeRemaining"], 0)
 
     def test_canonical_schema_and_profile_golden_fixtures(self) -> None:
         contracts = Path(__file__).resolve().parents[1] / "contracts"

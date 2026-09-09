@@ -24,12 +24,17 @@ from fastapi import HTTPException
 from psycopg.types.json import Jsonb
 
 from .config import PlatformSettings
+from .canonical_v3_contract import (
+    CanonicalReportError,
+    validate_canonical_report as validate_semantic_report,
+)
 from .repository import assert_schema, connect, new_id, utcnow
 from .security import REQUEST_ID_RE, SHA256_RE, sha256_bytes
 
 
 SCHEMA_VERSION = 1
 LEGACY_RENDERER_VERSION = "web-a4-canonical-v1"
+SEMANTIC_RENDERER_VERSIONS = {"web-a4-canonical-v2", "web-a4-canonical-v3"}
 RENDERER_PROFILES: dict[str, dict[str, Any]] = {
     "web-a4-v1": {"accent": "#16324f", "margin": 38, "fontSize": 9.5},
     "ios-a4-v1": {"accent": "#173d68", "margin": 40, "fontSize": 10},
@@ -109,17 +114,30 @@ def validate_canonical_report(
     if report.get("schemaVersion") != SCHEMA_VERSION:
         raise HTTPException(status_code=422, detail="unsupported report schemaVersion")
     declared_renderer = str(report.get("rendererVersion") or "")
+    if declared_renderer and declared_renderer not in (
+        set(RENDERER_PROFILES) | {LEGACY_RENDERER_VERSION} | SEMANTIC_RENDERER_VERSIONS
+    ):
+        raise HTTPException(status_code=422, detail="unsupported rendererVersion")
+    if declared_renderer in SEMANTIC_RENDERER_VERSIONS:
+        try:
+            report, _ = validate_semantic_report({"report": report})
+        except (CanonicalReportError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="invalid semantic canonical report") from exc
     profile = str(requested_profile or "").strip()
     if profile and profile not in RENDERER_PROFILES:
         raise HTTPException(status_code=422, detail="unsupported rendererProfile")
     if not profile:
-        if declared_renderer == LEGACY_RENDERER_VERSION:
+        if declared_renderer in {LEGACY_RENDERER_VERSION} | SEMANTIC_RENDERER_VERSIONS:
             profile = "web-a4-v1"
         elif declared_renderer in RENDERER_PROFILES:
             profile = declared_renderer
         else:
             raise HTTPException(status_code=422, detail="unsupported rendererVersion")
-    response_renderer = declared_renderer if declared_renderer == LEGACY_RENDERER_VERSION else profile
+    response_renderer = (
+        declared_renderer
+        if declared_renderer in {LEGACY_RENDERER_VERSION} | SEMANTIC_RENDERER_VERSIONS
+        else profile
+    )
     pages = report.get("pages")
     if not isinstance(pages, list) or not pages or len(pages) > 100:
         raise HTTPException(status_code=422, detail="report pages must contain 1 to 100 items")
@@ -964,17 +982,25 @@ def _renderer_report_payload(
 ) -> dict[str, Any]:
     report = copy.deepcopy(canonical.report)
     images: dict[str, str] = {}
+    semantic = canonical.response_renderer_version in SEMANTIC_RENDERER_VERSIONS
 
     def bundled_reference(value: object) -> str:
         data_uri = _renderer_image_data_uri(value, settings, asset_manifest)
         digest = sha256_bytes(data_uri.encode("ascii"))
         images[digest] = data_uri
-        return f"renderer-asset://{digest}"
+        # Semantic v2/v3 validates the complete inline report before the web
+        # renderer materializes images. Restore archived references here too.
+        return data_uri if semantic else f"renderer-asset://{digest}"
 
     for page in report["pages"]:
         map_image = page.get("mapImage")
         if map_image is not None and map_image != "":
             page["mapImage"] = bundled_reference(map_image)
+        photo = page.get("environmentPhoto")
+        if photo is not None and photo != "":
+            if not isinstance(photo, dict) or not isinstance(photo.get("src"), str):
+                raise HTTPException(status_code=422, detail="environmentPhoto is invalid")
+            page["environmentPhoto"] = {**photo, "src": bundled_reference(photo["src"])}
         opinions = page.get("opinionImages")
         if opinions is None:
             continue
@@ -991,6 +1017,12 @@ def _renderer_report_payload(
         page["opinionImages"] = normalized
     if len(images) > settings.report_asset_max_count:
         raise HTTPException(status_code=413, detail="report contains too many image assets")
+    if semantic:
+        try:
+            report, _ = validate_semantic_report({"report": report, "contentHash": canonical.content_hash})
+        except (CanonicalReportError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="semantic report integrity check failed") from exc
+        return {"report": report, "rendererProfile": canonical.renderer_profile, "contentHash": canonical.content_hash}
     return {"report": report, "rendererProfile": canonical.renderer_profile, "assetBundle": images}
 
 

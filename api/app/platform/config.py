@@ -63,6 +63,7 @@ class PlatformSettings:
     kakao: ProviderSettings
     naver: ProviderSettings
     google: ProviderSettings
+    environment_analysis_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "PlatformSettings":
@@ -116,6 +117,7 @@ class PlatformSettings:
             google_play_package_name=os.getenv("GOOGLE_PLAY_PACKAGE_NAME", "").strip(),
             google_play_service_account_file=os.getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_FILE", "").strip(),
             environment_data_dir=Path(os.getenv("ENVIRONMENT_DATA_DIR", "/data/environment")).resolve(),
+            environment_analysis_enabled=os.getenv("ENVIRONMENT_ANALYSIS_ENABLED", "false").strip().lower() == "true",
             internal_service_token=os.getenv("PLATFORM_INTERNAL_SERVICE_TOKEN", "").strip(),
             kakao=ProviderSettings(
                 # The *_OAUTH_* names are explicit mobile overrides. The

@@ -4,15 +4,37 @@ import csv
 import json
 import math
 import re
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from threading import BoundedSemaphore
 from typing import Any, Iterable
 
 from fastapi import HTTPException
 
 from .config import PlatformSettings
+
+
+# Reads can outlive an HTTP timeout. Slots are released when the underlying
+# future actually finishes, so retries cannot create an unbounded job queue.
+CATEGORY_TIMEOUT_SECONDS = 8.0
+_category_executor = ThreadPoolExecutor(max_workers=7, thread_name_prefix="environment-analysis")
+_analysis_slots = BoundedSemaphore(2)
+_category_slots = BoundedSemaphore(14)
+
+
+def _submit_category(job) -> Future:
+    if not _category_slots.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="environment analysis is busy")
+    try:
+        future = _category_executor.submit(job)
+    except Exception:
+        _category_slots.release()
+        raise
+    future.add_done_callback(lambda _: _category_slots.release())
+    return future
 
 
 REGION_ALIASES = (
@@ -662,6 +684,15 @@ def _legacy_categories(categories: dict[str, Any]) -> dict[str, Any]:
 
 
 def analyze_environment(settings: PlatformSettings, payload: object) -> dict[str, Any]:
+    if not _analysis_slots.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="environment analysis is busy")
+    try:
+        return _analyze_environment(settings, payload)
+    finally:
+        _analysis_slots.release()
+
+
+def _analyze_environment(settings: PlatformSettings, payload: object) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="request body must be an object")
     location = payload.get("location") if isinstance(payload.get("location"), dict) else {}
@@ -683,6 +714,7 @@ def analyze_environment(settings: PlatformSettings, payload: object) -> dict[str
     categories: dict[str, Any] = {}
     errors: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
+    jobs: list[tuple[str, Future]] = []
 
     def fail(key: str, code: str = "dataset_unavailable", retryable: bool = True) -> None:
         categories[key] = _error_category(key)
@@ -694,15 +726,17 @@ def analyze_environment(settings: PlatformSettings, payload: object) -> dict[str
         builder,
         transform=lambda points: tuple(points),
     ) -> None:
-        try:
+        def calculate():
             loaded = [(path, label, _load(path)) for path, label in files]
             combined = transform(point for _, _, points in loaded for point in points)
-            categories[key] = builder(combined)
-            sources.extend(
+            return builder(combined), [
                 _source(base, path, key, label, points) for path, label, points in loaded
-            )
-        except (OSError, ValueError, TypeError, csv.Error, json.JSONDecodeError):
-            fail(key)
+            ]
+
+        try:
+            jobs.append((key, _submit_category(calculate)))
+        except HTTPException:
+            fail(key, "analysis_busy")
 
     if region is None:
         for key in ("bus", "amenities", "parks"):
@@ -716,8 +750,6 @@ def analyze_environment(settings: PlatformSettings, payload: object) -> dict[str
                 "regionKey": region,
             },
         )
-        if categories["bus"].get("status") == "ok":
-            categories["bus"]["nearest"] = _bus_nearest(categories["bus"]["items"])
         evaluate(
             "amenities",
             [(base / "amenities" / f"{region}.csv", "소상공인시장진흥공단 상가정보")],
@@ -754,6 +786,22 @@ def analyze_environment(settings: PlatformSettings, payload: object) -> dict[str
         [(base / "cctv.json", "공공 CCTV정보")],
         lambda points: _cctv_category(points, lat, lng),
     )
+
+    completed, _ = wait([future for _, future in jobs], timeout=CATEGORY_TIMEOUT_SECONDS)
+    for key, future in jobs:
+        if future not in completed:
+            future.cancel()
+            fail(key, "dataset_timeout")
+            continue
+        try:
+            category, category_sources = future.result()
+        except (OSError, ValueError, TypeError, csv.Error, json.JSONDecodeError):
+            fail(key)
+        else:
+            categories[key] = category
+            sources.extend(category_sources)
+    if categories["bus"].get("status") == "ok":
+        categories["bus"]["nearest"] = _bus_nearest(categories["bus"]["items"])
 
     successes = sum(
         categories.get(key, {}).get("status") == "ok" for key in RADIUS_PROFILE

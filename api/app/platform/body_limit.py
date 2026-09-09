@@ -20,7 +20,7 @@ class RequestBodyLimitMiddleware:
         if path.startswith("/api/mobile/v1/auth/"):
             return 64 * 1024
         if path == "/api/v1/environment-analysis":
-            return 256 * 1024
+            return 16 * 1024
         if path.startswith("/api/internal/v1/web/"):
             return 256 * 1024
         return None

@@ -269,6 +269,10 @@ components:
       type: object
       required: [report]
       properties:
+        contentHash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: SHA-256 of sorted compact UTF-8 canonical JSON; semantic v2/v3 uses normalized JSON, shared with the web renderer.
         rendererProfile: {type: string, enum: [web-a4-v1, ios-a4-v1, android-a4-v1]}
         report: {$ref: './contracts/canonical-report-v1.schema.json'}
     EnvironmentRequest:

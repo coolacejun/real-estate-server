@@ -1,0 +1,414 @@
+{
+  "rendererProfile": "web-a4-v1",
+  "report": {
+    "schemaVersion": 1,
+    "rendererVersion": "web-a4-canonical-v3",
+    "mappingVersion": "mobile-canonical-v3",
+    "reportId": "synthetic-v3",
+    "title": "건축·토지 검토 보고서",
+    "address": "서울특별시 테스트로 123",
+    "includedItems": [
+      "cover",
+      "building",
+      "unit",
+      "land",
+      "cadastre",
+      "ai",
+      "opinion",
+      "enforcement",
+      "broker"
+    ],
+    "officeInfo": {
+      "officeName": "검증용 사무소",
+      "officePhone": "02-0000-0000"
+    },
+    "reportTheme": "navy",
+    "pages": [
+      {
+        "pageKey": "cover",
+        "layout": "cover",
+        "title": "건축·토지 검토 보고서",
+        "address": "서울특별시 테스트로 123",
+        "createdAt": "2026-09-09"
+      },
+      {
+        "pageKey": "building:synthetic",
+        "reportType": "building",
+        "layout": "property-report",
+        "title": "일반건축물",
+        "address": "서울특별시 테스트로 123",
+        "reportDate": "2026-09-09",
+        "reportRows": [
+          [
+            {
+              "label": "명칭",
+              "value": "검증용 건물",
+              "span": 3
+            },
+            {
+              "label": "주용도",
+              "value": "업무시설",
+              "span": 3
+            }
+          ],
+          {
+            "sectionTitle": "층별개요",
+            "className": "floor-overview-heading"
+          },
+          {
+            "floorOverviewTable": true,
+            "headers": [
+              "층수",
+              "용도",
+              "면적/구조"
+            ],
+            "rows": [
+              [
+                "지상 1층",
+                "업무시설",
+                "101㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 2층",
+                "업무시설",
+                "102㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 3층",
+                "업무시설",
+                "103㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 4층",
+                "업무시설",
+                "104㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 5층",
+                "업무시설",
+                "105㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 6층",
+                "업무시설",
+                "106㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 7층",
+                "업무시설",
+                "107㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 8층",
+                "업무시설",
+                "108㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 9층",
+                "업무시설",
+                "109㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 10층",
+                "업무시설",
+                "110㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 11층",
+                "업무시설",
+                "111㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 12층",
+                "업무시설",
+                "112㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 13층",
+                "업무시설",
+                "113㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 14층",
+                "업무시설",
+                "114㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 15층",
+                "업무시설",
+                "115㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 16층",
+                "업무시설",
+                "116㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 17층",
+                "업무시설",
+                "117㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 18층",
+                "업무시설",
+                "118㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 19층",
+                "업무시설",
+                "119㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 20층",
+                "업무시설",
+                "120㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 21층",
+                "업무시설",
+                "121㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 22층",
+                "업무시설",
+                "122㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 23층",
+                "업무시설",
+                "123㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 24층",
+                "업무시설",
+                "124㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 25층",
+                "업무시설",
+                "125㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 26층",
+                "업무시설",
+                "126㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 27층",
+                "업무시설",
+                "127㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 28층",
+                "업무시설",
+                "128㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 29층",
+                "업무시설",
+                "129㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 30층",
+                "업무시설",
+                "130㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 31층",
+                "업무시설",
+                "131㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 32층",
+                "업무시설",
+                "132㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 33층",
+                "업무시설",
+                "133㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 34층",
+                "업무시설",
+                "134㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 35층",
+                "업무시설",
+                "135㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 36층",
+                "업무시설",
+                "136㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 37층",
+                "업무시설",
+                "137㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 38층",
+                "업무시설",
+                "138㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 39층",
+                "업무시설",
+                "139㎡ · 철근콘크리트구조"
+              ],
+              [
+                "지상 40층",
+                "업무시설",
+                "140㎡ · 철근콘크리트구조"
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "pageKey": "unit:101",
+        "reportType": "unit",
+        "layout": "property-report",
+        "title": "호별정보",
+        "reportDate": "2026-09-09",
+        "reportRows": [
+          [
+            {
+              "label": "동·호",
+              "value": "검증동 101호",
+              "span": 3
+            },
+            {
+              "label": "전유면적",
+              "value": "84.97㎡",
+              "span": 3
+            }
+          ]
+        ]
+      },
+      {
+        "pageKey": "land",
+        "reportType": "land",
+        "layout": "property-report",
+        "title": "토지정보",
+        "reportRows": [
+          [
+            {
+              "label": "지목",
+              "value": "대",
+              "span": 3
+            },
+            {
+              "label": "면적",
+              "value": "432.10㎡",
+              "span": 3
+            }
+          ]
+        ],
+        "sourceRows": {
+          "plans": [
+            {
+              "name": "제2종일반주거지역",
+              "interference": "포함"
+            },
+            {
+              "name": "소로2류",
+              "interference": "접함",
+              "remark": "합성 검증 항목"
+            }
+          ]
+        }
+      },
+      {
+        "pageKey": "cadastre",
+        "reportType": "cadastre",
+        "layout": "property-report",
+        "title": "지적도",
+        "reportRows": [],
+        "mapImage": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAFoCAIAAABIUN0GAAAFlklEQVR4nO3XMRHAMBDEQDuEQiqEzDgsXoV3CVypuf1+ZwEAs57hPQBAgAGg4QEDQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAACDAB38IABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA4AAA8AdPGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAAQEGgIAAA0BAgAEgIMAAEBBgAAgIMAAEBBgAAgIMAAEBBoCAAANAQIABICDAABAQYAAICDAABAQYAAICDAABAQaAgAADQECAASAgwAAQEGAACAgwAAQEGAACAgwAa94PQ3ID9GKVnqsAAAAASUVORK5CYII=",
+        "mapCaption": "합성 검증 이미지"
+      },
+      {
+        "pageKey": "environment",
+        "reportType": "ai",
+        "layout": "property-report",
+        "title": "주변환경분석",
+        "reportRows": [
+          [
+            {
+              "label": "교통환경",
+              "value": "테스트역 도보 9분",
+              "span": 6
+            }
+          ]
+        ],
+        "environmentDataNotice": "공공데이터는 현장 확인이 필요합니다.",
+        "environmentPhoto": {
+          "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAASwAAACMCAIAAABJdAN4AAABoUlEQVR4nO3VMREAIBDEwAdDmMIQjpGRZtfAVZlb574BOjvcBkQIPU8IMRFCTIQQEyHERAgxEUJMhBATIcRECDERQkyEEBMhxEQIMRFCTIQQEyHERAgxEUJMhBATIcRECDERQkyEEBMhxEQIMRFCTIQQEyHERAgxEUJMhBATIcRECDERQkyEEBMhxEQIMRFCTIQQEyHERAgxEUJMhBATIcRECDERQkyEEBMhxEQIMRFCTIQQEyHERAgxEUJMhBATIcRECDERQkyEEBMhxEQIMRFCTIQQEyHERAgxEUJMhBATIcRECDERQkyEEBMhxEQIMRFCTIQQEyHERAgxEUJMhBATIcRECDERQkyEEBMhxEQIMRFCTIQQEyHERAgxEUJMhBATIcRECDERQkyEEBMhxEQIMRFCTIQQEyHERAgxEUJMhBATIcRECDERQkyEEBMhxEQIMRFCTIQQEyHERAgxEUJMhBATIcRECDERQkyEEBMhxEQIMRFCTIQQEyHERAgxEUJMhBATIcRECDERQkyEEBMhxEQIMRFCTIQQEyHERAjT+pghAjyBGDPIAAAAAElFTkSuQmCC",
+          "name": "합성 주변환경 사진",
+          "caption": "주변환경 사진 보관함 복원 검증"
+        }
+      },
+      {
+        "pageKey": "opinion",
+        "layout": "opinion",
+        "title": "검토 의견",
+        "opinionText": "이 문서는 합성 데이터로 만든 렌더러 검증용 보고서입니다.\n현장 확인이 필요합니다.",
+        "opinionImages": [
+          {
+            "id": "synthetic",
+            "name": "합성 이미지",
+            "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGQAAAA8CAIAAAAfXYiZAAAAmklEQVR4nO3SMREAIRAEQXhDmMIQjt/CTd4dbzS1+9y3mPmGO8RqPCsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxArECsQKxBrzf1KEQGcjB0TRQAAAABJRU5ErkJggg=="
+          }
+        ]
+      },
+      {
+        "pageKey": "enforcement",
+        "reportType": "enforcement",
+        "layout": "property-report",
+        "title": "이행강제금 참고 계산기",
+        "enforcementSnapshot": {
+          "estimatedAmount": 123456,
+          "ruleVersion": "synthetic-2026",
+          "jurisdiction": {
+            "name": "검증용 관할"
+          },
+          "normalizedInputs": {
+            "impositionDate": "2026-09-09",
+            "inputs": {
+              "violationAreaM2": 10,
+              "taxStandardValuePerM2Won": 20000
+            }
+          },
+          "lineItems": [
+            {
+              "label": "합성 산식",
+              "formula": "100 × 1234.56",
+              "amount": 123456
+            }
+          ],
+          "disclaimer": "계산 기능을 검증하는 합성 값입니다."
+        }
+      },
+      {
+        "pageKey": "broker:1",
+        "layout": "broker-disclosure",
+        "title": "건물·토지 설명용",
+        "brokerCode": "①",
+        "brokerFormData": {
+          "landArea": "432.10㎡",
+          "officialLandCategory": "대",
+          "officialUse": "업무시설"
+        },
+        "brokerRows": []
+      }
+    ]
+  },
+  "expected": {
+    "contentHash": "e2a5a56b0c8e50770a29e777581b15127b9cfdc2cddd40d6f84745ca0a5d389c",
+    "minimumPdfBytes": 20000,
+    "minimumPages": 9
+  }
+}

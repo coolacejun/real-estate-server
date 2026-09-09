@@ -7,7 +7,7 @@
   "properties": {
     "schemaVersion": {"const": 1},
     "rendererVersion": {
-      "enum": ["web-a4-v1", "ios-a4-v1", "android-a4-v1", "web-a4-canonical-v1"]
+      "enum": ["web-a4-v1", "ios-a4-v1", "android-a4-v1", "web-a4-canonical-v1", "web-a4-canonical-v2", "web-a4-canonical-v3"]
     },
     "mappingVersion": {"type": "string", "maxLength": 120},
     "reportId": {"type": "string", "maxLength": 160},
@@ -28,6 +28,23 @@
     }
   },
   "additionalProperties": true,
+  "allOf": [{
+    "if": {"properties": {"rendererVersion": {"enum": ["web-a4-canonical-v2", "web-a4-canonical-v3"]}}},
+    "then": {"properties": {
+      "includedItems": {"maxItems": 20},
+      "pages": {
+        "maxItems": 60,
+        "items": {"propertyNames": {"enum": [
+          "pageKey", "reportType", "layout", "title", "footerTitle", "pageNo", "address",
+          "reportDate", "createdAt", "placeName", "reportRows", "sourceRows", "mapImage",
+          "mapCaption", "environmentPhoto", "environmentDataNotice", "opinionText",
+          "opinionImages", "opinionPart", "opinionTotal", "opinionLineCount",
+          "enforcementSnapshot", "brokerSections", "brokerHasContinuation", "brokerCode",
+          "brokerFormData", "brokerRows"
+        ]}}
+      }
+    }}
+  }],
   "$defs": {
     "imageReference": {
       "type": "string",
@@ -46,6 +63,15 @@
         "brokerRows": {"type": ["array", "object"]},
         "opinionText": {"type": "string"},
         "mapImage": {"$ref": "#/$defs/imageReference"},
+        "environmentPhoto": {
+          "type": "object",
+          "required": ["src"],
+          "properties": {
+            "src": {"$ref": "#/$defs/imageReference"},
+            "name": {"type": "string"},
+            "caption": {"type": "string"}
+          }
+        },
         "opinionImages": {
           "type": "array",
           "maxItems": 6,
