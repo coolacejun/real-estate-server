@@ -42,14 +42,28 @@
         "title": {"type": "string"},
         "address": {"type": "string"},
         "reportRows": {"type": "array"},
-        "sourceRows": {"type": "array"},
-        "brokerRows": {"type": "array"},
+        "sourceRows": {"type": ["array", "object"]},
+        "brokerRows": {"type": ["array", "object"]},
         "opinionText": {"type": "string"},
         "mapImage": {"$ref": "#/$defs/imageReference"},
         "opinionImages": {
           "type": "array",
           "maxItems": 6,
-          "items": {"$ref": "#/$defs/imageReference"}
+          "items": {
+            "anyOf": [
+              {"$ref": "#/$defs/imageReference"},
+              {
+                "type": "object",
+                "required": ["src"],
+                "properties": {
+                  "id": {"type": "string"},
+                  "name": {"type": "string"},
+                  "src": {"$ref": "#/$defs/imageReference"}
+                },
+                "additionalProperties": true
+              }
+            ]
+          }
         }
       },
       "additionalProperties": true

@@ -32,11 +32,16 @@ os.environ.setdefault("MOBILE_OAUTH_CALLBACK_BASE_URL", "https://building-land.t
 
 from app.main import app
 from app.platform.config import get_settings
-from app.platform.oauth import ProviderIdentity
+from app.platform.oauth import ProviderIdentity, fetch_provider_identity
 from app.platform.reports import begin_final_usage, render_pdf, validate_canonical_report
 from app.platform.repository import new_id
 from app.platform.security import sha256_text
-from app.platform.store import FakeStoreVerifier, verifier_for
+from app.platform.store import (
+    AppleStoreVerifier,
+    FakeStoreVerifier,
+    GooglePlayVerifier,
+    verifier_for,
+)
 
 
 PNG_1X1 = base64.b64decode(
@@ -212,6 +217,166 @@ class MobilePlatformContractTest(unittest.TestCase):
             headers={"Authorization": f"Bearer {rotated.json()['accessToken']}"},
         )
         self.assertEqual(revoked_access.status_code, 401)
+        self.assertEqual(token.json()["tokenType"], "Bearer")
+        self.assertEqual(token.json()["accessTokenExpiresIn"], 900)
+        with psycopg.connect(self.database_url) as connection:
+            event_types = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT event_type FROM mobile_auth_events WHERE user_id = %s",
+                    (token.json()["user"]["id"],),
+                ).fetchall()
+            }
+        self.assertTrue(
+            {
+                "oauth_identity_resolved",
+                "authorization_code_exchanged",
+                "refresh_rotated",
+                "refresh_rejected",
+            }.issubset(event_types)
+        )
+
+    def test_google_oidc_nonce_and_verified_email_are_required(self) -> None:
+        verifier = "g" * 64
+        challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode()).digest()
+        ).decode().rstrip("=")
+        start = self.client.post(
+            "/api/mobile/v1/auth/oauth/start",
+            json={
+                "provider": "google",
+                "codeChallenge": challenge,
+                "redirectUri": "buildingland://oauth/callback",
+            },
+        )
+        self.assertEqual(start.status_code, 200, start.text)
+        self.assertEqual(start.headers["cache-control"], "no-store")
+        authorization = urlparse(start.json()["authorizationUrl"])
+        nonce = parse_qs(authorization.query)["nonce"][0]
+        state = start.json()["state"]
+        with psycopg.connect(self.database_url) as connection:
+            stored = connection.execute(
+                "SELECT nonce_hash FROM mobile_oauth_flows WHERE state_hash = %s",
+                (sha256_text(state),),
+            ).fetchone()[0]
+        self.assertEqual(stored.strip(), sha256_text(nonce))
+
+        claims = {
+            "sub": "google-subject",
+            "email": "verified@example.test",
+            "email_verified": True,
+            "name": "Verified User",
+            "nonce": nonce,
+        }
+        with patch(
+            "app.platform.oauth._form_post_json",
+            return_value={"id_token": "signed-id-token"},
+        ), patch(
+            "google.oauth2.id_token.verify_oauth2_token",
+            return_value=claims,
+        ) as verifier_call:
+            identity = fetch_provider_identity(
+                get_settings(),
+                provider="google",
+                authorization_code="provider-code",
+                state=state,
+                expected_nonce_hash=sha256_text(nonce),
+            )
+        self.assertEqual(identity.subject, "google-subject")
+        self.assertEqual(identity.email, "verified@example.test")
+        self.assertTrue(identity.email_verified)
+        self.assertEqual(verifier_call.call_args.args[2], "test-client")
+
+        claims["nonce"] = "wrong-nonce"
+        with patch(
+            "app.platform.oauth._form_post_json",
+            return_value={"id_token": "signed-id-token"},
+        ), patch(
+            "google.oauth2.id_token.verify_oauth2_token",
+            return_value=claims,
+        ):
+            with self.assertRaises(HTTPException) as mismatch:
+                fetch_provider_identity(
+                    get_settings(),
+                    provider="google",
+                    authorization_code="provider-code",
+                    state=state,
+                    expected_nonce_hash=sha256_text(nonce),
+                )
+        self.assertEqual(mismatch.exception.status_code, 400)
+
+    def test_oauth_cancellation_returns_to_stored_uri_once(self) -> None:
+        verifier = "c" * 64
+        challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode()).digest()
+        ).decode().rstrip("=")
+        start = self.client.post(
+            "/api/mobile/v1/auth/oauth/start",
+            json={
+                "provider": "naver",
+                "codeChallenge": challenge,
+                "redirectUri": "buildingland://oauth/callback",
+            },
+        )
+        state = start.json()["state"]
+        cancelled = self.client.get(
+            f"/api/mobile/v1/auth/oauth/callback/naver?state={state}&error=access_denied"
+        )
+        self.assertEqual(cancelled.status_code, 302, cancelled.text)
+        callback = urlparse(cancelled.headers["location"])
+        self.assertEqual(f"{callback.scheme}://{callback.netloc}{callback.path}", "buildingland://oauth/callback")
+        self.assertEqual(parse_qs(callback.query)["error"], ["access_denied"])
+        replay = self.client.get(
+            f"/api/mobile/v1/auth/oauth/callback/naver?state={state}&error=access_denied"
+        )
+        self.assertEqual(replay.status_code, 400)
+
+    def test_concurrent_social_resolution_grants_free_credits_once(self) -> None:
+        verifier = "q" * 64
+        challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode()).digest()
+        ).decode().rstrip("=")
+        starts = [
+            self.client.post(
+                "/api/mobile/v1/auth/oauth/start",
+                json={
+                    "provider": "kakao",
+                    "codeChallenge": challenge,
+                    "redirectUri": "buildingland://oauth/callback",
+                },
+            ).json()["state"]
+            for _ in range(2)
+        ]
+
+        def callback(state: str):
+            return self.client.get(
+                f"/api/mobile/v1/auth/oauth/callback/kakao?state={state}&code=provider-code"
+            )
+
+        with patch(
+            "app.platform.oauth.fetch_provider_identity",
+            return_value=ProviderIdentity(
+                "concurrent-subject", "concurrent@example.test", "Concurrent", True
+            ),
+        ):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                callbacks = list(pool.map(callback, starts))
+        self.assertEqual([response.status_code for response in callbacks], [302, 302])
+        with psycopg.connect(self.database_url) as connection:
+            users = connection.execute(
+                """
+                SELECT users.id, users.free_remaining
+                FROM platform_users AS users
+                JOIN platform_identities AS identities ON identities.user_id = users.id
+                WHERE identities.provider = 'kakao' AND identities.provider_subject = 'concurrent-subject'
+                """
+            ).fetchall()
+            grants = connection.execute(
+                "SELECT COUNT(*) FROM platform_credit_ledger WHERE reason = 'initial_account_grant'"
+            ).fetchone()[0]
+        self.assertEqual(len(users), 1)
+        self.assertEqual(users[0][1], 3)
+        self.assertEqual(grants, 1)
 
     def test_identity_is_subject_based_free_grant_is_once_and_linking_is_explicit(self) -> None:
         first = self._oauth_login("kakao", "same-subject", "shared@example.test")
@@ -462,6 +627,98 @@ class MobilePlatformContractTest(unittest.TestCase):
             )
         self.assertEqual(missing_google.exception.status_code, 503)
 
+    def test_apple_and_google_verifiers_enforce_account_binding(self) -> None:
+        settings = get_settings()
+        account_token = str(uuid.uuid4())
+        apple = AppleStoreVerifier(
+            replace(settings, apple_bundle_id="com.example.buildingland")
+        )
+        apple_payload = {
+            "bundleId": "com.example.buildingland",
+            "productId": "buildingland.report_credits_10",
+            "transactionId": "apple-transaction-1",
+            "appAccountToken": account_token,
+            "environment": "Sandbox",
+        }
+        with patch.object(apple, "_verified_jws_payload", return_value=apple_payload):
+            verified_apple = apple.verify(
+                product_id="buildingland.report_credits_10",
+                verification_data="header.payload.signature",
+                transaction_id="apple-transaction-1",
+                account_token=account_token,
+            )
+        self.assertEqual(verified_apple.transaction_key, "apple-transaction-1")
+
+        apple_payload["appAccountToken"] = str(uuid.uuid4())
+        with patch.object(apple, "_verified_jws_payload", return_value=apple_payload):
+            with self.assertRaises(HTTPException) as wrong_apple_account:
+                apple.verify(
+                    product_id="buildingland.report_credits_10",
+                    verification_data="header.payload.signature",
+                    transaction_id="apple-transaction-1",
+                    account_token=account_token,
+                )
+        self.assertEqual(wrong_apple_account.exception.status_code, 422)
+
+        credential_file = Path(self.temp_dir.name) / "google-service-account.json"
+        credential_file.write_text("{}", encoding="utf-8")
+        google = GooglePlayVerifier(
+            replace(
+                settings,
+                google_play_package_name="com.example.buildingland",
+                google_play_service_account_file=str(credential_file),
+            )
+        )
+
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict[str, object]:
+                return {
+                    "purchaseState": 0,
+                    "orderId": "google-order-1",
+                    "obfuscatedExternalAccountId": account_token,
+                }
+
+        class Session:
+            @staticmethod
+            def get(*args, **kwargs):
+                return Response()
+
+        with patch.object(google, "_session", return_value=Session()):
+            verified_google = google.verify(
+                product_id="buildingland.report_credits_10",
+                verification_data="google-purchase-token",
+                transaction_id="client-transaction-1",
+                account_token=account_token,
+            )
+        self.assertEqual(verified_google.transaction_key, "google-order-1")
+
+        class WrongAccountResponse(Response):
+            @staticmethod
+            def json() -> dict[str, object]:
+                return {
+                    "purchaseState": 0,
+                    "orderId": "google-order-1",
+                    "obfuscatedExternalAccountId": str(uuid.uuid4()),
+                }
+
+        class WrongAccountSession:
+            @staticmethod
+            def get(*args, **kwargs):
+                return WrongAccountResponse()
+
+        with patch.object(google, "_session", return_value=WrongAccountSession()):
+            with self.assertRaises(HTTPException) as wrong_google_account:
+                google.verify(
+                    product_id="buildingland.report_credits_10",
+                    verification_data="google-purchase-token",
+                    transaction_id="client-transaction-1",
+                    account_token=account_token,
+                )
+        self.assertEqual(wrong_google_account.exception.status_code, 422)
+
     def test_android_post_commit_failure_redelivers_without_second_grant(self) -> None:
         _, _, headers = self._create_user()
         catalog_response = self.client.get("/api/mobile/v1/store/catalog?platform=android", headers=headers)
@@ -676,13 +933,16 @@ class MobilePlatformContractTest(unittest.TestCase):
         self.assertFalse(result["partial"])
         self.assertEqual(
             [row["label"] for row in result["reportRows"]],
-            ["대상 위치", "도로명주소", "교통", "생활편의", "공원", "학교", "보안등", "CCTV"],
+            ["대상지", "도로명주소", "교통환경", "학군환경", "생활편의시설", "공원환경", "보안등", "CCTV"],
         )
+        self.assertEqual(result["categories"]["bus"]["status"], "ok")
+        self.assertEqual(result["categories"]["rail"]["status"], "ok")
+        self.assertEqual(result["categories"]["schools"]["elementary"]["count"], 1)
         (self.environment / "parks" / "seoul.csv").unlink()
         partial = self.client.post("/api/v1/environment-analysis", json=body)
         self.assertEqual(partial.status_code, 200, partial.text)
         self.assertTrue(partial.json()["partial"])
-        self.assertEqual(partial.json()["categories"]["park"]["status"], "error")
+        self.assertEqual(partial.json()["categories"]["parks"]["status"], "error")
 
     def test_canonical_schema_and_profile_golden_fixtures(self) -> None:
         contracts = Path(__file__).resolve().parents[1] / "contracts"
@@ -690,17 +950,24 @@ class MobilePlatformContractTest(unittest.TestCase):
         profiles = json.loads((contracts / "renderer-profiles-v1.json").read_text(encoding="utf-8"))
         self.assertEqual(schema["properties"]["schemaVersion"]["const"], 1)
         self.assertEqual(set(profiles["profiles"]), {"web-a4-v1", "ios-a4-v1", "android-a4-v1"})
-        for fixture_path in sorted((contracts / "golden").glob("*.json")):
-            with self.subTest(fixture=fixture_path.name):
-                fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
-                canonical = validate_canonical_report(
-                    fixture["report"], requested_profile=fixture["rendererProfile"]
-                )
-                self.assertEqual(canonical.content_hash, fixture["expected"]["contentHash"])
-                pdf = render_pdf(get_settings(), canonical)
-                self.assertGreaterEqual(len(pdf), fixture["expected"]["minimumPdfBytes"])
-                page_count = len(re.findall(rb"/Type\s*/Page\b", pdf))
-                self.assertGreaterEqual(page_count, fixture["expected"]["minimumPages"])
+        fake_pdf = (
+            b"%PDF-1.7\n/Producer (Skia/PDF m151)\n"
+            + b"/Type /Page\n" * 100
+            + b"0" * 50_000
+            + b"\n%%EOF"
+        )
+        with patch("app.platform.reports._request_renderer_pdf", return_value=fake_pdf):
+            for fixture_path in sorted((contracts / "golden").glob("*.json")):
+                with self.subTest(fixture=fixture_path.name):
+                    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+                    canonical = validate_canonical_report(
+                        fixture["report"], requested_profile=fixture["rendererProfile"]
+                    )
+                    self.assertEqual(canonical.content_hash, fixture["expected"]["contentHash"])
+                    pdf = render_pdf(get_settings(), canonical)
+                    self.assertGreaterEqual(len(pdf), fixture["expected"]["minimumPdfBytes"])
+                    page_count = len(re.findall(rb"/Type\s*/Page\b", pdf))
+                    self.assertGreaterEqual(page_count, fixture["expected"]["minimumPages"])
 
 
 if __name__ == "__main__":

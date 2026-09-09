@@ -7,6 +7,7 @@ import html
 import json
 import os
 import re
+import socket
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -15,6 +16,9 @@ from io import BytesIO
 from pathlib import Path
 from threading import Lock
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from fastapi import HTTPException
 from psycopg.types.json import Jsonb
@@ -34,6 +38,9 @@ RENDERER_PROFILES: dict[str, dict[str, Any]] = {
 ALLOWED_LAYOUTS = {"cover", "property-report", "broker-disclosure", "opinion"}
 DATA_URI_RE = re.compile(r"^data:(image/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\r\n]+)$", re.IGNORECASE)
 ASSET_URI_RE = re.compile(r"^asset://([0-9a-f-]{36})$")
+CHROMIUM_PRODUCER_RE = re.compile(
+    rb"/Producer\s*\((?:[^)]*(?:Skia|Chrom(?:e|ium))[^)]*)\)", re.IGNORECASE
+)
 _FONT_LOCK = Lock()
 _REGISTERED_FONT: str | None = None
 
@@ -227,11 +234,18 @@ def _font_name(settings: PlatformSettings) -> str:
             from reportlab.pdfbase import pdfmetrics
             from reportlab.pdfbase.ttfonts import TTFont
 
-            if Path(settings.report_font_path).is_file():
-                pdfmetrics.registerFont(TTFont("BuildingLandReport", settings.report_font_path, subfontIndex=0))
-                _REGISTERED_FONT = "BuildingLandReport"
-            else:
+            candidates = [
+                Path(settings.report_font_path),
+                Path("/usr/share/fonts/truetype/nanum/NanumGothic.ttf"),
+                Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+                Path("/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf"),
+            ]
+            font_path = next((candidate for candidate in candidates if candidate.is_file()), None)
+            if font_path is None:
                 _REGISTERED_FONT = "Helvetica"
+            else:
+                pdfmetrics.registerFont(TTFont("BuildingLandReport", font_path, subfontIndex=0))
+                _REGISTERED_FONT = "BuildingLandReport"
         except Exception:
             _REGISTERED_FONT = "Helvetica"
         return _REGISTERED_FONT
@@ -249,33 +263,305 @@ def _display(value: Any, limit: int = 500) -> str:
     return text[:limit]
 
 
+def _maybe_json(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{":
+        return value
+    try:
+        return json.loads(stripped)
+    except (TypeError, ValueError):
+        return value
+
+
+def _friendly_value(value: Any, limit: int = 700) -> str:
+    value = _maybe_json(value)
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "예" if value else "아니오"
+    if isinstance(value, list):
+        parts = [_friendly_value(item, 180) for item in value]
+        return ", ".join(part for part in parts if part)[:limit]
+    if isinstance(value, dict):
+        name = _friendly_value(
+            value.get("name") or value.get("label") or value.get("title") or value.get("mode"), 180
+        )
+        details: list[str] = []
+        mode = _friendly_value(value.get("mode"), 80)
+        if mode and mode != name:
+            details.append(mode)
+        minutes = _friendly_value(value.get("minutes"), 40)
+        if minutes:
+            details.append(minutes if minutes.endswith("분") else f"{minutes}분")
+        detail = " ".join(details) or _friendly_value(
+            value.get("time") or value.get("distance") or value.get("value"), 180
+        )
+        if name:
+            return (f"{name} ({detail})" if detail else name)[:limit]
+        parts = [_friendly_value(item, 180) for item in value.values()]
+        return ", ".join(part for part in parts if part)[:limit]
+    return str(value)[:limit]
+
+
+def _report_row_groups(page: dict[str, Any]) -> list[list[dict[str, Any]]]:
+    raw_groups = page.get("reportRows")
+    if not isinstance(raw_groups, list):
+        return []
+    groups: list[list[dict[str, Any]]] = []
+    for raw_group in raw_groups:
+        candidates = raw_group if isinstance(raw_group, list) else [raw_group]
+        cells: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            label = _friendly_value(candidate.get("label"), 100)
+            value = _friendly_value(candidate.get("value"), 700)
+            if label or value:
+                default_span = 6 if len(candidates) == 1 else 3
+                try:
+                    span = int(candidate.get("span") or default_span)
+                except (TypeError, ValueError):
+                    span = default_span
+                cells.append(
+                    {
+                        "label": label,
+                        "value": value,
+                        "span": max(2, min(6, span)),
+                    }
+                )
+        if cells:
+            groups.append(cells)
+    return groups
+
+
+def _floor_rows(page: dict[str, Any]) -> list[tuple[str, str, str]]:
+    source_rows = page.get("sourceRows")
+    if isinstance(source_rows, dict) and isinstance(source_rows.get("floors"), list):
+        result: list[tuple[str, str, str]] = []
+        for item in source_rows["floors"]:
+            if not isinstance(item, dict):
+                continue
+            floor = _friendly_value(item.get("floor") or item.get("floorName"), 80)
+            usage = _friendly_value(item.get("usage") or item.get("mainPurpsCdNm"), 240)
+            area = _friendly_value(item.get("area") or item.get("areaM2"), 120)
+            if area and re.fullmatch(r"[\d,.]+", area):
+                area = f"{area}㎡"
+            structure = _friendly_value(item.get("structure") or item.get("strctCdNm"), 180)
+            detail = " / ".join(part for part in (area, structure) if part)
+            display = _friendly_value(item.get("display"), 500)
+            if not (floor or usage or detail) and display:
+                parts = [part.strip() for part in re.split(r"\s*[|/·]\s*", display, maxsplit=2)]
+                floor = parts[0] if parts else ""
+                usage = parts[1] if len(parts) > 1 else ""
+                detail = parts[2] if len(parts) > 2 else ""
+            if floor or usage or detail:
+                result.append((floor, usage, detail))
+        if result:
+            return result
+    result = []
+    for group in _report_row_groups(page):
+        for cell in group:
+            if cell["label"] in {"층별개요", "층별 개요", "층 정보"}:
+                parts = [part.strip() for part in re.split(r"\s*[|/·]\s*", cell["value"], maxsplit=2)]
+                if parts:
+                    result.append(
+                        (
+                            parts[0],
+                            parts[1] if len(parts) > 1 else "",
+                            parts[2] if len(parts) > 2 else "",
+                        )
+                    )
+    return result
+
+
+_BROKER_LABELS = {
+    "landArea": "면적(㎡)",
+    "landCategory": "지목",
+    "useApprovalDate": "준공년도 (증·개축년도)",
+    "officialBuildingUse": "건축물대장상 용도",
+    "actualUse": "실제 용도",
+    "structure": "구조",
+    "direction": "방향",
+    "seismicApply": "내진설계 적용여부",
+    "seismicAbility": "내진능력",
+    "violationStatus": "건축물대장상 위반건축물 여부",
+    "violationDetail": "위반내용",
+    "useArea": "용도지역",
+    "useDistrict": "용도지구",
+    "useZone": "용도구역",
+    "buildingCoverageLimit": "건폐율 상한",
+    "floorAreaRatioLimit": "용적률 상한",
+    "districtPlan": "지구단위계획구역 및 도시·군관리계획",
+    "otherRestrictions": "그 밖의 이용제한 및 거래규제사항",
+    "permitDetails": "허가·신고 구역 여부",
+    "speculationDetails": "투기지역 여부",
+    "landTransactionPermit": "토지거래허가구역",
+    "landSpeculationArea": "토지 투기지역",
+    "housingSpeculationArea": "주택 투기지역",
+    "overheatedSpeculationArea": "투기과열지구",
+    "parkingType": "주차장 유형",
+    "parkingDetail": "주차장 상세",
+    "bus": "버스",
+    "rail": "지하철",
+    "elementarySchool": "초등학교",
+    "middleSchool": "중학교",
+    "highSchool": "고등학교",
+}
+_BROKER_SECTIONS = (
+    (
+        "① 중개대상물 확인 사항",
+        (
+            "landArea", "landCategory", "useApprovalDate", "officialBuildingUse",
+            "actualUse", "structure", "direction", "seismicApply", "seismicAbility",
+            "violationStatus", "violationDetail",
+        ),
+    ),
+    (
+        "③ 토지이용계획 및 거래규제",
+        (
+            "useArea", "useDistrict", "useZone", "buildingCoverageLimit",
+            "floorAreaRatioLimit", "districtPlan", "otherRestrictions", "permitDetails",
+            "speculationDetails", "landTransactionPermit", "landSpeculationArea",
+            "housingSpeculationArea", "overheatedSpeculationArea",
+        ),
+    ),
+    (
+        "⑤ 입지조건 및 주차",
+        ("bus", "rail", "parkingType", "parkingDetail", "elementarySchool", "middleSchool", "highSchool"),
+    ),
+)
+
+
+def _broker_values(page: dict[str, Any]) -> dict[str, Any]:
+    raw = page.get("brokerRows")
+    if isinstance(raw, dict):
+        return dict(raw)
+    values: dict[str, Any] = {}
+    if not isinstance(raw, list):
+        return values
+    for group in raw:
+        candidates = group if isinstance(group, list) else [group]
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            key = str(
+                item.get("key") or item.get("field") or item.get("name") or item.get("label") or ""
+            ).strip()
+            if key:
+                values[key] = item.get("value")
+                continue
+            for nested_key, nested_value in item.items():
+                if nested_key not in {"label", "span"}:
+                    values[str(nested_key)] = nested_value
+    return values
+
+
+def _broker_sections(page: dict[str, Any]) -> list[tuple[str, list[tuple[str, str]]]]:
+    values = _broker_values(page)
+    used: set[str] = set()
+    sections: list[tuple[str, list[tuple[str, str]]]] = []
+    for title, keys in _BROKER_SECTIONS:
+        rows: list[tuple[str, str]] = []
+        for key in keys:
+            if key not in values:
+                continue
+            used.add(key)
+            rendered = _friendly_value(values[key], 900)
+            if rendered:
+                rows.append((_BROKER_LABELS[key], rendered))
+        if rows:
+            sections.append((title, rows))
+    extras = [
+        _friendly_value(values[key], 900)
+        for key in sorted(values)
+        if key not in used and _friendly_value(values[key], 900)
+    ]
+    if extras:
+        sections.append(("추가 정보", [(f"추가 정보 {index}", value) for index, value in enumerate(extras, 1)]))
+    return sections
+
+
+def _page_image_references(page: dict[str, Any]) -> list[tuple[str, str]]:
+    images: list[tuple[str, str]] = []
+    if isinstance(page.get("mapImage"), str):
+        images.append(("지도", page["mapImage"]))
+    raw_opinions = page.get("opinionImages")
+    if isinstance(raw_opinions, list):
+        for index, item in enumerate(raw_opinions, 1):
+            if isinstance(item, str):
+                images.append((f"의견 사진 {index}", item))
+            elif isinstance(item, dict) and isinstance(item.get("src"), str):
+                name = _friendly_value(item.get("name"), 100) or f"의견 사진 {index}"
+                images.append((name, item["src"]))
+    return images
+
+
+def _enforcement_rows(value: Any) -> list[tuple[str, str]]:
+    value = _maybe_json(value)
+    if not isinstance(value, dict):
+        rendered = _friendly_value(value, 1200)
+        return [("위반건축물 정보", rendered)] if rendered else []
+    labels = {
+        "isViolation": "위반 여부", "violation": "위반 여부", "status": "상태",
+        "description": "상세 내용", "source": "출처", "checkedAt": "확인 시각",
+    }
+    rows: list[tuple[str, str]] = []
+    unknown = 1
+    for key, item in value.items():
+        rendered = _friendly_value(item, 800)
+        if not rendered:
+            continue
+        label = labels.get(str(key))
+        if label is None:
+            label = f"추가 확인 정보 {unknown}"
+            unknown += 1
+        rows.append((label, rendered))
+    return rows
+
+
+_INCLUDED_ITEM_LABELS = {
+    "cover": "표지",
+    "building": "건축물정보",
+    "land": "토지정보",
+    "cadastre": "지적도",
+    "cadastral": "지적도",
+    "ai": "주변환경분석",
+    "environment": "주변환경분석",
+    "broker": "중개대상물 확인·설명",
+    "brokerDisclosure": "중개대상물 확인·설명",
+    "opinion": "설명 및 의견",
+    "description": "설명 및 의견",
+    "enforcement": "위반건축물 검토",
+}
+
+
+def _included_item_labels(items: list[Any]) -> str:
+    return ", ".join(
+        _INCLUDED_ITEM_LABELS.get(str(item), _friendly_value(item, 100))
+        for item in items
+        if _friendly_value(item, 100)
+    )
+
+
 def _page_lines(page: dict[str, Any]) -> list[str]:
     lines: list[str] = []
-    for key in ("address", "placeName", "createdAt"):
+    for label, key in (("주소", "address"), ("장소", "placeName"), ("작성일", "createdAt")):
         if page.get(key):
-            lines.append(f"{key}: {_display(page[key])}")
-    for row_group_key in ("reportRows", "sourceRows", "brokerRows"):
-        groups = page.get(row_group_key)
-        if not isinstance(groups, list):
-            continue
-        for group in groups:
-            cells = group if isinstance(group, list) else [group]
-            values: list[str] = []
-            for cell in cells:
-                if isinstance(cell, dict):
-                    label = _display(cell.get("label"), 100)
-                    value = _display(cell.get("value"), 300)
-                    values.append(f"{label}: {value}" if label else value)
-                else:
-                    values.append(_display(cell, 300))
-            if values:
-                lines.append("  |  ".join(values))
+            lines.append(f"{label}: {_friendly_value(page[key])}")
+    for group in _report_row_groups(page):
+        rendered = [f"{cell['label']}: {cell['value']}" if cell["label"] else cell["value"] for cell in group]
+        if rendered:
+            lines.append("  |  ".join(rendered))
+    for section, rows in _broker_sections(page):
+        lines.append(section)
+        lines.extend(f"{label}: {value}" for label, value in rows)
     if page.get("opinionText"):
         lines.extend(str(page["opinionText"]).splitlines())
     if page.get("environmentDataNotice"):
-        lines.append(_display(page["environmentDataNotice"], 800))
-    if page.get("enforcementSnapshot"):
-        lines.append(_display(page["enforcementSnapshot"], 1200))
+        lines.append(_friendly_value(page["environmentDataNotice"], 800))
+    lines.extend(f"{label}: {value}" for label, value in _enforcement_rows(page.get("enforcementSnapshot")))
     return lines
 
 
@@ -296,7 +582,34 @@ def _asset_bytes(
     target = (settings.report_asset_dir / storage_key).resolve()
     if settings.report_asset_dir not in target.parents or not target.is_file():
         raise HTTPException(status_code=410, detail="report asset is unavailable")
-    return target.read_bytes()
+    try:
+        raw = target.read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=410, detail="report asset is unavailable") from exc
+    if not raw or len(raw) > settings.report_asset_max_bytes:
+        raise HTTPException(status_code=410, detail="report asset size is invalid")
+    try:
+        expected_size = int(record.get("byteSize"))
+    except (TypeError, ValueError):
+        expected_size = len(raw)
+    expected_hash = str(record.get("contentHash") or "").lower()
+    if expected_size != len(raw) or not SHA256_RE.fullmatch(expected_hash) or sha256_bytes(raw) != expected_hash:
+        raise HTTPException(status_code=410, detail="report asset integrity check failed")
+    content_type = str(record.get("contentType") or "")
+    if content_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise HTTPException(status_code=410, detail="report asset type is invalid")
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(raw)) as image:
+            image.verify()
+        with Image.open(BytesIO(raw)) as image:
+            expected_format = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}[content_type]
+            if image.format != expected_format or image.width * image.height > 40_000_000:
+                raise ValueError("image format or dimensions are invalid")
+    except Exception as exc:
+        raise HTTPException(status_code=410, detail="report asset content is invalid") from exc
+    return raw
 
 
 def _asset_content_type(value: str, asset_manifest: list[dict[str, Any]] | None) -> str:
@@ -312,19 +625,20 @@ def _asset_content_type(value: str, asset_manifest: list[dict[str, Any]] | None)
     raise HTTPException(status_code=410, detail="report asset metadata is unavailable")
 
 
-def render_pdf(
+def _render_reportlab_pdf(
     settings: PlatformSettings,
     canonical: CanonicalReport,
     *,
     asset_manifest: list[dict[str, Any]] | None = None,
 ) -> bytes:
     try:
+        from reportlab.lib import colors
         from reportlab.lib.colors import HexColor
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle
         from reportlab.lib.units import mm
         from reportlab.platypus import Image as FlowImage
-        from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
+        from reportlab.platypus import KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     except ImportError as exc:
         raise HTTPException(status_code=503, detail="canonical PDF renderer is unavailable") from exc
 
@@ -362,6 +676,157 @@ def render_pdf(
         spaceAfter=5,
         wordWrap="CJK",
     )
+    label_style = ParagraphStyle(
+        "ReportLabel",
+        parent=body_style,
+        fontSize=max(body_size - 1, 8),
+        leading=body_size + 3,
+        textColor=HexColor("#374151"),
+        spaceAfter=0,
+    )
+    header_style = ParagraphStyle(
+        "ReportHeader",
+        parent=label_style,
+        textColor=colors.white,
+    )
+    section_style = ParagraphStyle(
+        "ReportSection",
+        parent=body_style,
+        fontSize=body_size + 1,
+        leading=body_size + 5,
+        textColor=HexColor(profile["accent"]),
+        spaceBefore=7,
+        spaceAfter=5,
+    )
+    note_style = ParagraphStyle(
+        "ReportNote",
+        parent=body_style,
+        fontSize=max(body_size - 1, 8),
+        leading=body_size + 3,
+        textColor=HexColor("#4b5563"),
+    )
+    content_width = page_width - margin * 2
+
+    def paragraph(value: Any, style: ParagraphStyle = body_style) -> Paragraph:
+        text = html.escape(_friendly_value(value, 5000)).replace("\n", "<br/>") or "&nbsp;"
+        return Paragraph(text, style)
+
+    def simple_table(rows: list[tuple[str, str]], *, header: tuple[str, str] | None = None) -> Table:
+        data: list[list[Any]] = []
+        repeat_rows = 0
+        if header:
+            data.append([paragraph(header[0], header_style), paragraph(header[1], header_style)])
+            repeat_rows = 1
+        data.extend([paragraph(label, label_style), paragraph(value)] for label, value in rows)
+        table = Table(
+            data,
+            colWidths=[content_width * 0.29, content_width * 0.71],
+            repeatRows=repeat_rows,
+            splitByRow=1,
+            splitInRow=1,
+            hAlign="LEFT",
+        )
+        commands: list[tuple[Any, ...]] = [
+            ("FONTNAME", (0, 0), (-1, -1), font),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("GRID", (0, 0), (-1, -1), 0.35, HexColor("#cbd5e1")),
+            ("BACKGROUND", (0, 0), (0, -1), HexColor("#f1f5f9")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]
+        if header:
+            commands.extend(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), HexColor(profile["accent"])),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ]
+            )
+        table.setStyle(TableStyle(commands))
+        return table
+
+    def field_table(groups: list[list[dict[str, Any]]]) -> Table | None:
+        data: list[list[Any]] = []
+        spans: list[tuple[Any, ...]] = []
+        for group in groups:
+            row: list[Any] = []
+            column = 0
+            for cell in group:
+                if column >= 6:
+                    break
+                width = min(int(cell["span"]), 6 - column)
+                if width < 2:
+                    break
+                row.extend([paragraph(cell["label"], label_style), paragraph(cell["value"])])
+                row.extend([""] * (width - 2))
+                if width > 2:
+                    spans.append(("SPAN", (column + 1, len(data)), (column + width - 1, len(data))))
+                column += width
+            row.extend([""] * (6 - len(row)))
+            data.append(row)
+        if not data:
+            return None
+        table = Table(
+            data,
+            colWidths=[content_width * factor for factor in (0.12, 0.20, 0.18, 0.12, 0.20, 0.18)],
+            splitByRow=1,
+            splitInRow=1,
+            hAlign="LEFT",
+        )
+        commands: list[tuple[Any, ...]] = [
+            ("FONTNAME", (0, 0), (-1, -1), font),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("GRID", (0, 0), (-1, -1), 0.35, HexColor("#cbd5e1")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]
+        for row_index, group in enumerate(groups):
+            column = 0
+            for cell in group:
+                if column >= 6:
+                    break
+                span = min(int(cell["span"]), 6 - column)
+                if span < 2:
+                    break
+                commands.append(("BACKGROUND", (column, row_index), (column, row_index), HexColor("#f1f5f9")))
+                column += span
+        commands.extend(spans)
+        table.setStyle(TableStyle(commands))
+        return table
+
+    def floor_table(rows: list[tuple[str, str, str]]) -> Table:
+        data = [[paragraph("층", header_style), paragraph("용도", header_style), paragraph("면적 / 구조", header_style)]]
+        data.extend([paragraph(floor), paragraph(usage), paragraph(detail)] for floor, usage, detail in rows)
+        table = Table(
+            data,
+            colWidths=[content_width * 0.17, content_width * 0.38, content_width * 0.45],
+            repeatRows=1,
+            splitByRow=1,
+            splitInRow=1,
+            hAlign="LEFT",
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    ("FONTNAME", (0, 0), (-1, -1), font),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("GRID", (0, 0), (-1, -1), 0.35, HexColor("#cbd5e1")),
+                    ("BACKGROUND", (0, 0), (-1, 0), HexColor(profile["accent"])),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, HexColor("#f8fafc")]),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        return table
+
     story: list[Any] = []
     image_streams: list[BytesIO] = []
     pages = canonical.report["pages"]
@@ -369,15 +834,50 @@ def render_pdf(
         if index:
             story.append(PageBreak())
         story.append(Paragraph(html.escape(_display(page.get("title") or canonical.report.get("title"), 160)), title_style))
-        for line in _page_lines(page):
-            story.append(Paragraph(html.escape(line).replace("\n", "<br/>") or "&nbsp;", body_style))
-        story.append(Spacer(1, 4 * mm))
-        image_values: list[str] = []
-        if isinstance(page.get("mapImage"), str):
-            image_values.append(page["mapImage"])
-        if isinstance(page.get("opinionImages"), list):
-            image_values.extend(item for item in page["opinionImages"] if isinstance(item, str))
-        for image_value in image_values[:6]:
+        address = page.get("address") or canonical.report.get("address")
+        if address:
+            story.extend([simple_table([("주소", _friendly_value(address, 700))]), Spacer(1, 3 * mm)])
+
+        layout = page.get("layout")
+        groups = _report_row_groups(page)
+        if layout == "cover":
+            cover_rows: list[tuple[str, str]] = []
+            if page.get("placeName"):
+                cover_rows.append(("대상", _friendly_value(page["placeName"])))
+            if page.get("createdAt"):
+                cover_rows.append(("작성일", _friendly_value(page["createdAt"])))
+            items = canonical.report.get("includedItems")
+            if isinstance(items, list) and items:
+                cover_rows.append(("포함 항목", _included_item_labels(items)))
+            if cover_rows:
+                story.extend([simple_table(cover_rows), Spacer(1, 3 * mm)])
+        elif layout == "broker-disclosure":
+            for section_title, rows in _broker_sections(page):
+                story.extend(
+                    [KeepTogether([paragraph(section_title, section_style), simple_table(rows)]), Spacer(1, 2 * mm)]
+                )
+        else:
+            floors = _floor_rows(page)
+            floor_labels = {"층별개요", "층별 개요", "층 정보"}
+            filtered_groups = [
+                [cell for cell in group if cell["label"] not in floor_labels]
+                for group in groups
+            ]
+            table = field_table([group for group in filtered_groups if group])
+            if table is not None:
+                story.extend([table, Spacer(1, 3 * mm)])
+            if floors:
+                story.extend([paragraph("층별 개요", section_style), floor_table(floors), Spacer(1, 3 * mm)])
+            enforcement = _enforcement_rows(page.get("enforcementSnapshot"))
+            if enforcement:
+                story.extend([paragraph("위반건축물 확인", section_style), simple_table(enforcement), Spacer(1, 3 * mm)])
+            if page.get("environmentDataNotice"):
+                story.extend([paragraph("자료 안내", section_style), paragraph(page["environmentDataNotice"], note_style)])
+
+        if page.get("opinionText"):
+            story.extend([paragraph("의견", section_style), paragraph(page["opinionText"])])
+        story.append(Spacer(1, 3 * mm))
+        for image_label, image_value in _page_image_references(page)[:6]:
             raw = _asset_bytes(image_value, settings, asset_manifest)
             if not raw:
                 continue
@@ -389,7 +889,7 @@ def render_pdf(
                 scale = min(max_width / flow_image.imageWidth, max_height / flow_image.imageHeight, 1.0)
                 flow_image.drawWidth = flow_image.imageWidth * scale
                 flow_image.drawHeight = flow_image.imageHeight * scale
-                story.extend([flow_image, Spacer(1, 4 * mm)])
+                story.extend([paragraph(image_label, section_style), flow_image, Spacer(1, 4 * mm)])
             except Exception as exc:
                 raise HTTPException(status_code=422, detail="report image could not be rendered") from exc
 
@@ -415,6 +915,161 @@ def render_pdf(
     return result
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+def _renderer_endpoint(settings: PlatformSettings) -> str:
+    raw = settings.report_renderer_url
+    parsed = urlparse(raw)
+    host = (parsed.hostname or "").lower()
+    allowed = {item.lower() for item in settings.report_renderer_allowed_hosts}
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or host not in allowed
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path != "/api/internal/mobile-report-pdf"
+    ):
+        raise HTTPException(status_code=503, detail="canonical PDF renderer endpoint is invalid")
+    if settings.app_env == "production" and parsed.scheme != "http":
+        # Production uses the isolated compose network. TLS endpoints are supported
+        # outside production, but an external hostname is never accepted implicitly.
+        raise HTTPException(status_code=503, detail="canonical PDF renderer endpoint is invalid")
+    return raw
+
+
+def _renderer_image_data_uri(
+    value: object,
+    settings: PlatformSettings,
+    asset_manifest: list[dict[str, Any]] | None,
+) -> str:
+    if not isinstance(value, str) or not (DATA_URI_RE.fullmatch(value) or ASSET_URI_RE.fullmatch(value)):
+        raise HTTPException(status_code=422, detail="report image reference is invalid")
+    raw = _asset_bytes(value, settings, asset_manifest)
+    if raw is None:
+        raise HTTPException(status_code=410, detail="report asset metadata is unavailable")
+    mime = _asset_content_type(value, asset_manifest)
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def _renderer_report_payload(
+    settings: PlatformSettings,
+    canonical: CanonicalReport,
+    asset_manifest: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    report = copy.deepcopy(canonical.report)
+    images: dict[str, str] = {}
+
+    def bundled_reference(value: object) -> str:
+        data_uri = _renderer_image_data_uri(value, settings, asset_manifest)
+        digest = sha256_bytes(data_uri.encode("ascii"))
+        images[digest] = data_uri
+        return f"renderer-asset://{digest}"
+
+    for page in report["pages"]:
+        map_image = page.get("mapImage")
+        if map_image is not None and map_image != "":
+            page["mapImage"] = bundled_reference(map_image)
+        opinions = page.get("opinionImages")
+        if opinions is None:
+            continue
+        if not isinstance(opinions, list) or len(opinions) > 6:
+            raise HTTPException(status_code=422, detail="opinionImages is invalid")
+        normalized: list[object] = []
+        for item in opinions:
+            if isinstance(item, str):
+                normalized.append(bundled_reference(item))
+            elif isinstance(item, dict) and isinstance(item.get("src"), str):
+                normalized.append({**item, "src": bundled_reference(item["src"])})
+            else:
+                raise HTTPException(status_code=422, detail="opinionImages is invalid")
+        page["opinionImages"] = normalized
+    if len(images) > settings.report_asset_max_count:
+        raise HTTPException(status_code=413, detail="report contains too many image assets")
+    return {"report": report, "rendererProfile": canonical.renderer_profile, "assetBundle": images}
+
+
+def _renderer_error_detail(raw: bytes) -> str:
+    try:
+        payload = json.loads(raw[:4096].decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return "canonical PDF renderer rejected the request"
+    if not isinstance(payload, dict):
+        return "canonical PDF renderer rejected the request"
+    detail = str(payload.get("detail") or "").strip()
+    return detail[:240] if detail else "canonical PDF renderer rejected the request"
+
+
+def _request_renderer_pdf(settings: PlatformSettings, payload: dict[str, Any]) -> bytes:
+    if not settings.internal_service_token:
+        raise HTTPException(status_code=503, detail="canonical PDF renderer authentication is not configured")
+    body = _canonical_json_bytes(payload)
+    request = Request(
+        _renderer_endpoint(settings),
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+            "X-Internal-Service-Token": settings.internal_service_token,
+        },
+    )
+    opener = build_opener(ProxyHandler({}), _NoRedirect())
+    try:
+        with opener.open(request, timeout=settings.report_renderer_timeout_seconds + 5) as response:
+            if response.headers.get("X-Report-Renderer") != "chromium-skia":
+                raise HTTPException(status_code=502, detail="canonical PDF renderer identity is invalid")
+            length_header = response.headers.get("Content-Length")
+            if length_header:
+                try:
+                    if int(length_header) > settings.report_renderer_max_pdf_bytes:
+                        raise HTTPException(status_code=502, detail="canonical PDF renderer output is too large")
+                except ValueError as exc:
+                    raise HTTPException(status_code=502, detail="canonical PDF renderer length is invalid") from exc
+            result = response.read(settings.report_renderer_max_pdf_bytes + 1)
+    except HTTPException:
+        raise
+    except HTTPError as exc:
+        status = exc.code if exc.code in {413, 422, 502, 503, 504} else 502
+        raise HTTPException(status_code=status, detail=_renderer_error_detail(exc.read(4096))) from exc
+    except (socket.timeout, TimeoutError) as exc:
+        raise HTTPException(status_code=504, detail="canonical PDF renderer timed out") from exc
+    except URLError as exc:
+        if isinstance(exc.reason, (socket.timeout, TimeoutError)):
+            raise HTTPException(status_code=504, detail="canonical PDF renderer timed out") from exc
+        raise HTTPException(status_code=503, detail="canonical PDF renderer is unavailable") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="canonical PDF renderer is unavailable") from exc
+    if len(result) > settings.report_renderer_max_pdf_bytes:
+        raise HTTPException(status_code=502, detail="canonical PDF renderer output is too large")
+    if not result.startswith(b"%PDF-") or not CHROMIUM_PRODUCER_RE.search(result[:256_000]):
+        raise HTTPException(status_code=502, detail="canonical PDF renderer returned a non-Chromium artifact")
+    return result
+
+
+def render_pdf(
+    settings: PlatformSettings,
+    canonical: CanonicalReport,
+    *,
+    asset_manifest: list[dict[str, Any]] | None = None,
+) -> bytes:
+    """Render canonical JSON only through the isolated Chromium service.
+
+    The ReportLab implementation remains in this module solely as a rollback
+    reference and is intentionally never used as a success-path fallback.
+    """
+
+    return _request_renderer_pdf(
+        settings,
+        _renderer_report_payload(settings, canonical, asset_manifest),
+    )
+
+
 def render_html(
     settings: PlatformSettings,
     canonical: CanonicalReport,
@@ -424,12 +1079,7 @@ def render_html(
     sections: list[str] = []
     for page in canonical.report["pages"]:
         lines = "".join(f"<p>{html.escape(line)}</p>" for line in _page_lines(page))
-        images: list[str] = []
-        for key in ("mapImage",):
-            if isinstance(page.get(key), str):
-                images.append(page[key])
-        if isinstance(page.get("opinionImages"), list):
-            images.extend(item for item in page["opinionImages"] if isinstance(item, str))
+        images = [value for _, value in _page_image_references(page)]
         image_html = ""
         for value in images:
             raw = _asset_bytes(value, settings, asset_manifest)

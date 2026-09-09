@@ -10,7 +10,7 @@ servers:
 paths:
   /api/mobile/v1/auth/oauth/start:
     post:
-      summary: Begin provider OAuth with PKCE S256
+      summary: Begin provider OAuth with PKCE S256, state, and Google OIDC nonce
       security:
         - {}
         - bearerAuth: []
@@ -39,7 +39,8 @@ paths:
       parameters:
         - {name: provider, in: path, required: true, schema: {type: string, enum: [kakao, naver, google]}}
         - {name: state, in: query, required: true, schema: {type: string}}
-        - {name: code, in: query, required: true, schema: {type: string}}
+        - {name: code, in: query, required: false, schema: {type: string}}
+        - {name: error, in: query, required: false, schema: {type: string}}
       responses:
         '302': {description: Redirect to the exact allowlisted mobile URI}
         '400': {$ref: '#/components/responses/ValidationError'}
@@ -201,6 +202,9 @@ paths:
       responses:
         '200':
           description: Versioned full or partial result with per-category errors and sources
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EnvironmentResponse'}
         '413': {$ref: '#/components/responses/TooLarge'}
         '422': {$ref: '#/components/responses/ValidationError'}
         '503': {$ref: '#/components/responses/Unavailable'}
@@ -229,6 +233,9 @@ components:
         storeEntitlements: {type: array, items: {type: object}}
         accessToken: {type: string}
         refreshToken: {type: string}
+        tokenType: {type: string, const: Bearer}
+        accessTokenExpiresIn: {type: integer, minimum: 1}
+        refreshTokenExpiresIn: {type: integer, minimum: 1}
     OAuthStartRequest:
       type: object
       required: [provider, codeChallenge, redirectUri]
@@ -283,6 +290,43 @@ components:
         parcelId: {type: string, pattern: '^[0-9]{19}$'}
         radiusProfile: {type: string, const: web-v1}
         calculationVersion: {type: string, const: environment-web-v1}
+    EnvironmentResponse:
+      type: object
+      required: [calculationVersion, radiusProfile, location, address, categories, reportRows, sources, generatedAt, errors, partial]
+      properties:
+        calculationVersion: {type: string, const: environment-web-v1}
+        radiusProfile: {type: string, const: web-v1}
+        location: {type: object}
+        address: {type: object}
+        categories:
+          type: object
+          required: [bus, rail, schools, amenities, parks, securityLights, cctv, traffic, school, convenience, park, streetlight]
+          properties:
+            bus: {$ref: '#/components/schemas/EnvironmentCategory'}
+            rail: {$ref: '#/components/schemas/EnvironmentCategory'}
+            schools:
+              allOf:
+                - {$ref: '#/components/schemas/EnvironmentCategory'}
+                - type: object
+                  required: [schools, elementary, middle, high]
+            amenities: {$ref: '#/components/schemas/EnvironmentCategory'}
+            parks: {$ref: '#/components/schemas/EnvironmentCategory'}
+            securityLights: {$ref: '#/components/schemas/EnvironmentCategory'}
+            cctv: {$ref: '#/components/schemas/EnvironmentCategory'}
+        reportRows: {type: array, items: {type: object}}
+        sources: {type: array, items: {type: object}}
+        generatedAt: {type: string, format: date-time}
+        errors: {type: array, items: {type: object}}
+        partial: {type: boolean}
+    EnvironmentCategory:
+      type: object
+      required: [status, radiusMeters]
+      properties:
+        status: {type: string, enum: [ok, error]}
+        radiusMeters: {type: integer, minimum: 1}
+        total: {type: integer, minimum: 0}
+        count: {type: integer, minimum: 0}
+        nearest: {}
   responses:
     Profile:
       description: Shared account profile

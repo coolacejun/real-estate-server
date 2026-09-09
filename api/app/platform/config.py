@@ -48,6 +48,10 @@ class PlatformSettings:
     report_asset_max_count: int
     report_asset_dir: Path
     report_font_path: str
+    report_renderer_url: str
+    report_renderer_allowed_hosts: tuple[str, ...]
+    report_renderer_timeout_seconds: int
+    report_renderer_max_pdf_bytes: int
     store_verifier_mode: str
     apple_bundle_id: str
     apple_shared_secret: str
@@ -89,6 +93,22 @@ class PlatformSettings:
             report_font_path=os.getenv(
                 "REPORT_FONT_PATH", "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
             ),
+            report_renderer_url=os.getenv(
+                "MOBILE_REPORT_RENDERER_URL",
+                "http://web:5180/api/internal/mobile-report-pdf",
+            ).strip(),
+            report_renderer_allowed_hosts=_csv(
+                "MOBILE_REPORT_RENDERER_ALLOWED_HOSTS", "web,localhost,127.0.0.1"
+            ),
+            report_renderer_timeout_seconds=_positive_int(
+                "MOBILE_REPORT_RENDERER_TIMEOUT_SECONDS", 45, minimum=5, maximum=120
+            ),
+            report_renderer_max_pdf_bytes=_positive_int(
+                "MOBILE_REPORT_RENDERER_MAX_PDF_BYTES",
+                32 * 1024 * 1024,
+                minimum=1024,
+                maximum=128 * 1024 * 1024,
+            ),
             store_verifier_mode=os.getenv("STORE_VERIFIER_MODE", "production").strip().lower(),
             apple_bundle_id=os.getenv("APPLE_BUNDLE_ID", "").strip(),
             apple_shared_secret=os.getenv("APPLE_SHARED_SECRET", "").strip(),
@@ -98,16 +118,31 @@ class PlatformSettings:
             environment_data_dir=Path(os.getenv("ENVIRONMENT_DATA_DIR", "/data/environment")).resolve(),
             internal_service_token=os.getenv("PLATFORM_INTERNAL_SERVICE_TOKEN", "").strip(),
             kakao=ProviderSettings(
-                client_id=os.getenv("KAKAO_OAUTH_CLIENT_ID", "").strip(),
-                client_secret=os.getenv("KAKAO_OAUTH_CLIENT_SECRET", "").strip(),
+                # The *_OAUTH_* names are explicit mobile overrides. The
+                # legacy names keep the already configured web app usable
+                # without copying credentials into a second secret source.
+                client_id=(
+                    os.getenv("KAKAO_OAUTH_CLIENT_ID", "").strip()
+                    or os.getenv("KAKAO_CLIENT_ID", "").strip()
+                ),
+                client_secret=(
+                    os.getenv("KAKAO_OAUTH_CLIENT_SECRET", "").strip()
+                    or os.getenv("KAKAO_CLIENT_SECRET", "").strip()
+                ),
                 authorization_url="https://kauth.kakao.com/oauth/authorize",
                 token_url="https://kauth.kakao.com/oauth/token",
                 userinfo_url="https://kapi.kakao.com/v2/user/me",
                 scope="account_email,profile_nickname",
             ),
             naver=ProviderSettings(
-                client_id=os.getenv("NAVER_OAUTH_CLIENT_ID", "").strip(),
-                client_secret=os.getenv("NAVER_OAUTH_CLIENT_SECRET", "").strip(),
+                client_id=(
+                    os.getenv("NAVER_OAUTH_CLIENT_ID", "").strip()
+                    or os.getenv("NAVER_CLIENT_ID", "").strip()
+                ),
+                client_secret=(
+                    os.getenv("NAVER_OAUTH_CLIENT_SECRET", "").strip()
+                    or os.getenv("NAVER_CLIENT_SECRET", "").strip()
+                ),
                 authorization_url="https://nid.naver.com/oauth2.0/authorize",
                 token_url="https://nid.naver.com/oauth2.0/token",
                 userinfo_url="https://openapi.naver.com/v1/nid/me",

@@ -12,7 +12,12 @@ from fastapi.responses import RedirectResponse
 
 from .config import PlatformSettings, get_settings
 from .environment import analyze_environment
-from .oauth import begin_oauth, complete_provider_callback, exchange_auth_code
+from .oauth import (
+    begin_oauth,
+    cancel_provider_callback,
+    complete_provider_callback,
+    exchange_auth_code,
+)
 from .reports import (
     AssetRecord,
     CanonicalReport,
@@ -33,6 +38,7 @@ from .repository import (
     get_or_create_store_account,
     grant_paid_credits,
     profile_payload,
+    record_auth_event,
     complete_paid_credit_reversal,
     prepare_paid_credit_reversal,
     resolve_external_web_account,
@@ -129,19 +135,22 @@ def _pdf_response(
 @router.post("/api/mobile/v1/auth/oauth/start")
 async def mobile_oauth_start(
     request: Request,
+    response: Response,
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
     _rate_limit(request, "oauth-start", 12, 60)
     payload = _body(await request.json())
     link_requested = payload.get("linkAccount") is True
     session = _session(authorization) if link_requested else None
-    return begin_oauth(
+    result = begin_oauth(
         _settings(),
         provider=str(payload.get("provider") or "").lower(),
         code_challenge=str(payload.get("codeChallenge") or ""),
         redirect_uri=str(payload.get("redirectUri") or ""),
         link_user_id=session["user_id"] if session else None,
     )
+    response.headers["Cache-Control"] = "no-store"
+    return result
 
 
 @router.get("/api/mobile/v1/auth/oauth/callback/{provider}")
@@ -152,30 +161,35 @@ def mobile_oauth_callback(
     error: str = Query(""),
 ) -> RedirectResponse:
     if error:
-        raise HTTPException(status_code=400, detail="OAuth authorization was cancelled")
-    destination = complete_provider_callback(
-        _settings(), provider=provider.lower(), state=state, authorization_code=code
-    )
+        destination = cancel_provider_callback(
+            _settings(), provider=provider.lower(), state=state
+        )
+    else:
+        destination = complete_provider_callback(
+            _settings(), provider=provider.lower(), state=state, authorization_code=code
+        )
     return RedirectResponse(destination, status_code=302, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/mobile/v1/auth/token")
-async def mobile_auth_token(request: Request) -> dict[str, Any]:
+async def mobile_auth_token(request: Request, response: Response) -> dict[str, Any]:
     _rate_limit(request, "oauth-token", 20, 60)
     payload = _body(await request.json())
     device_id = str(payload.get("deviceId") or "")
     if not DEVICE_ID_RE.fullmatch(device_id):
         raise HTTPException(status_code=422, detail="deviceId is invalid")
-    return exchange_auth_code(
+    result = exchange_auth_code(
         _settings(),
         code=str(payload.get("code") or ""),
         code_verifier=str(payload.get("codeVerifier") or ""),
         device_id=device_id,
     )
+    response.headers["Cache-Control"] = "no-store"
+    return result
 
 
 @router.post("/api/mobile/v1/auth/refresh")
-async def mobile_auth_refresh(request: Request) -> dict[str, Any]:
+async def mobile_auth_refresh(request: Request, response: Response) -> dict[str, Any]:
     _rate_limit(request, "oauth-refresh", 30, 60)
     payload = _body(await request.json())
     refresh_token = str(payload.get("refreshToken") or "")
@@ -190,15 +204,27 @@ async def mobile_auth_refresh(request: Request) -> dict[str, Any]:
         )
         profile = profile_payload(connection, user_id)
     profile.update({"accessToken": pair["accessToken"], "refreshToken": pair["refreshToken"]})
+    profile.update(
+        {
+            "tokenType": pair["tokenType"],
+            "accessTokenExpiresIn": pair["accessTokenExpiresIn"],
+            "refreshTokenExpiresIn": pair["refreshTokenExpiresIn"],
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
     return profile
 
 
 @router.get("/api/mobile/v1/me")
-def mobile_me(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+def mobile_me(
+    response: Response, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
     settings = _settings()
     session = _session(authorization)
     with connect(settings) as connection:
-        return profile_payload(connection, session["user_id"])
+        payload = profile_payload(connection, session["user_id"])
+    response.headers["Cache-Control"] = "private, no-store"
+    return payload
 
 
 @router.post("/api/mobile/v1/auth/logout", status_code=204)
@@ -207,12 +233,21 @@ def mobile_logout(authorization: str | None = Header(default=None)) -> Response:
     session = _session(authorization)
     with connect(settings) as connection:
         revoke_token_family(connection, session["family_id"], "logout")
+        record_auth_event(
+            connection,
+            event_type="logout",
+            user_id=session["user_id"],
+            family_id=session["family_id"],
+            device_id=session["device_id"],
+        )
     return Response(status_code=204)
 
 
 @router.get("/api/mobile/v1/store/catalog")
 def mobile_store_catalog(
-    platform: str = Query(...), authorization: str | None = Header(default=None)
+    response: Response,
+    platform: str = Query(...),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     normalized = platform.lower()
     if normalized not in {"ios", "android"}:
@@ -226,6 +261,7 @@ def mobile_store_catalog(
             platform=normalized,
             device_id=session["device_id"],
         )
+    response.headers["Cache-Control"] = "private, no-store"
     return {"accountToken": account_token, "products": catalog(normalized)}
 
 

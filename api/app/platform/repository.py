@@ -38,12 +38,41 @@ def connect(settings: PlatformSettings) -> Iterator[psycopg.Connection]:
 def assert_schema(connection: psycopg.Connection) -> None:
     try:
         row = connection.execute(
-            "SELECT version FROM schema_migrations WHERE version = '009_mobile_platform'"
+            "SELECT version FROM schema_migrations WHERE version = '010_mobile_auth_hardening'"
         ).fetchone()
     except psycopg.Error as exc:
         raise HTTPException(status_code=503, detail="account database migration is required") from exc
     if row is None:
         raise HTTPException(status_code=503, detail="account database migration is required")
+
+
+def record_auth_event(
+    connection: psycopg.Connection,
+    *,
+    event_type: str,
+    user_id: str | None = None,
+    provider: str | None = None,
+    family_id: str | None = None,
+    device_id: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    """Persist a credential-free authentication audit event."""
+    connection.execute(
+        """
+        INSERT INTO mobile_auth_events
+          (id, event_type, user_id, provider, family_id, device_hash, detail)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            new_id(),
+            event_type,
+            user_id,
+            provider,
+            family_id,
+            sha256_text(device_id) if device_id else None,
+            Jsonb(detail or {}),
+        ),
+    )
 
 
 def _insert_initial_free_grant(connection: psycopg.Connection, user_id: str) -> None:
@@ -66,6 +95,7 @@ def resolve_oauth_identity(
     email: str | None,
     display_name: str | None,
     link_user_id: str | None,
+    email_verified: bool | None = None,
 ) -> str:
     lock_key = f"identity:{provider}:{subject}"
     connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (lock_key,))
@@ -80,10 +110,11 @@ def resolve_oauth_identity(
         connection.execute(
             """
             UPDATE platform_identities
-            SET provider_email = %s, provider_display_name = %s, updated_at = NOW()
+            SET provider_email = %s, provider_display_name = %s,
+                provider_email_verified = %s, updated_at = NOW()
             WHERE provider = %s AND provider_subject = %s
             """,
-            (email, display_name, provider, subject),
+            (email, display_name, email_verified, provider, subject),
         )
         return existing_user_id
 
@@ -109,10 +140,11 @@ def resolve_oauth_identity(
     connection.execute(
         """
         INSERT INTO platform_identities
-          (id, user_id, provider, provider_subject, provider_email, provider_display_name)
-        VALUES (%s, %s, %s, %s, %s, %s)
+          (id, user_id, provider, provider_subject, provider_email,
+           provider_display_name, provider_email_verified)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
-        (new_id(), user_id, provider, subject, email, display_name),
+        (new_id(), user_id, provider, subject, email, display_name, email_verified),
     )
     connection.execute(
         """
@@ -137,7 +169,7 @@ def profile_payload(connection: psycopg.Connection, user_id: str) -> dict[str, A
         raise HTTPException(status_code=401, detail="login required")
     identities = connection.execute(
         """
-        SELECT provider, provider_email, provider_display_name
+        SELECT provider, provider_email, provider_display_name, provider_email_verified
         FROM platform_identities WHERE user_id = %s ORDER BY created_at
         """,
         (user_id,),
@@ -164,6 +196,7 @@ def profile_payload(connection: psycopg.Connection, user_id: str) -> dict[str, A
                 "provider": row["provider"],
                 "email": row["provider_email"] or "",
                 "displayName": row["provider_display_name"] or "",
+                "emailVerified": row["provider_email_verified"],
             }
             for row in identities
         ],
@@ -192,7 +225,7 @@ def issue_token_pair(
     device_id: str,
     family_id: str | None = None,
     parent_token_hash: str | None = None,
-) -> dict[str, str]:
+) -> dict[str, str | int]:
     access_token = random_token("ma_", 32)
     refresh_token = random_token("mr_", 48)
     family = family_id or new_id()
@@ -225,7 +258,14 @@ def issue_token_pair(
             utcnow() + timedelta(seconds=settings.access_token_ttl_seconds),
         ),
     )
-    return {"accessToken": access_token, "refreshToken": refresh_token, "familyId": family}
+    return {
+        "accessToken": access_token,
+        "refreshToken": refresh_token,
+        "familyId": family,
+        "tokenType": "Bearer",
+        "accessTokenExpiresIn": settings.access_token_ttl_seconds,
+        "refreshTokenExpiresIn": settings.refresh_token_ttl_seconds,
+    }
 
 
 def authenticate_access_token(connection: psycopg.Connection, raw_token: str) -> dict[str, str]:
@@ -255,7 +295,7 @@ def rotate_refresh_token(
     *,
     raw_token: str,
     device_id: str,
-) -> tuple[dict[str, str], str]:
+) -> tuple[dict[str, str | int], str]:
     token_hash = sha256_text(raw_token)
     row = connection.execute(
         "SELECT * FROM mobile_refresh_tokens WHERE token_hash = %s FOR UPDATE",
@@ -264,27 +304,37 @@ def rotate_refresh_token(
     if row is None:
         raise HTTPException(status_code=401, detail="invalid refresh token")
     family_id = str(row["family_id"])
-    invalid = (
-        row["device_id"] != device_id
-        or row["expires_at"] <= utcnow()
-        or row["revoked_at"] is not None
-        or row["rotated_at"] is not None
-    )
-    if invalid:
+    rejection_reason: str | None = None
+    if row["rotated_at"] is not None or row["revoked_at"] is not None:
+        rejection_reason = "refresh_replay"
+    elif row["device_id"] != device_id:
+        rejection_reason = "device_mismatch"
+    elif row["expires_at"] <= utcnow():
+        rejection_reason = "expired"
+    if rejection_reason:
         connection.execute(
             """
             UPDATE mobile_refresh_tokens
-            SET revoked_at = COALESCE(revoked_at, NOW()), revoke_reason = 'refresh_replay'
+            SET revoked_at = COALESCE(revoked_at, NOW()),
+                revoke_reason = COALESCE(revoke_reason, %s)
             WHERE family_id = %s
             """,
-            (family_id,),
+            (rejection_reason, family_id),
         )
         connection.execute(
             "UPDATE mobile_access_tokens SET revoked_at = COALESCE(revoked_at, NOW()) WHERE family_id = %s",
             (family_id,),
         )
+        record_auth_event(
+            connection,
+            event_type="refresh_rejected",
+            user_id=str(row["user_id"]),
+            family_id=family_id,
+            device_id=device_id,
+            detail={"reason": rejection_reason},
+        )
         connection.commit()
-        raise HTTPException(status_code=401, detail="refresh token replay detected")
+        raise HTTPException(status_code=401, detail="invalid or replayed refresh token")
 
     pair = issue_token_pair(
         connection,
@@ -309,6 +359,13 @@ def rotate_refresh_token(
         WHERE family_id = %s AND token_hash <> %s
         """,
         (family_id, sha256_text(pair["accessToken"])),
+    )
+    record_auth_event(
+        connection,
+        event_type="refresh_rotated",
+        user_id=str(row["user_id"]),
+        family_id=family_id,
+        device_id=device_id,
     )
     return pair, str(row["user_id"])
 

@@ -18,6 +18,7 @@ from .repository import (
     issue_token_pair,
     new_id,
     profile_payload,
+    record_auth_event,
     resolve_oauth_identity,
     utcnow,
 )
@@ -32,6 +33,7 @@ class ProviderIdentity:
     subject: str
     email: str | None
     display_name: str | None
+    email_verified: bool | None = None
 
 
 def _callback_url(settings: PlatformSettings, provider: str) -> str:
@@ -48,6 +50,11 @@ def begin_oauth(
 ) -> dict[str, str]:
     if provider not in SUPPORTED_PROVIDERS:
         raise HTTPException(status_code=422, detail="unsupported OAuth provider")
+    if (
+        settings.app_env == "production"
+        and settings.oauth_callback_base_url != "https://building-land.com"
+    ):
+        raise HTTPException(status_code=503, detail="OAuth callback base URL is invalid")
     challenge = validate_pkce_challenge(code_challenge)
     if redirect_uri not in settings.oauth_redirect_allowlist:
         raise HTTPException(status_code=422, detail="redirectUri is not allowed")
@@ -57,13 +64,16 @@ def begin_oauth(
 
     state = random_token("os_", 32)
     state_hash = sha256_text(state)
+    nonce = random_token("on_", 32)
+    nonce_hash = sha256_text(nonce)
     with connect(settings) as connection:
         assert_schema(connection)
         connection.execute(
             """
             INSERT INTO mobile_oauth_flows
-              (state_hash, provider, code_challenge, redirect_uri, link_user_id, expires_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
+              (state_hash, provider, code_challenge, redirect_uri, link_user_id,
+               nonce_hash, expires_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 state_hash,
@@ -71,6 +81,7 @@ def begin_oauth(
                 challenge,
                 redirect_uri,
                 link_user_id,
+                nonce_hash,
                 utcnow() + timedelta(seconds=settings.oauth_state_ttl_seconds),
             ),
         )
@@ -84,7 +95,7 @@ def begin_oauth(
     if provider_settings.scope:
         query["scope"] = provider_settings.scope
     if provider == "google":
-        query.update({"access_type": "offline", "prompt": "select_account"})
+        query.update({"prompt": "select_account", "nonce": nonce})
     authorization_url = f"{provider_settings.authorization_url}?{urllib.parse.urlencode(query)}"
     return {"state": state, "authorizationUrl": authorization_url}
 
@@ -122,7 +133,12 @@ def _get_json(url: str, access_token: str) -> dict[str, Any]:
 
 
 def fetch_provider_identity(
-    settings: PlatformSettings, *, provider: str, authorization_code: str, state: str
+    settings: PlatformSettings,
+    *,
+    provider: str,
+    authorization_code: str,
+    state: str,
+    expected_nonce_hash: str,
 ) -> ProviderIdentity:
     provider_settings = settings.provider(provider)
     token_form = {
@@ -135,6 +151,38 @@ def fetch_provider_identity(
     if provider == "naver":
         token_form["state"] = state
     token_payload = _form_post_json(provider_settings.token_url, token_form)
+    if provider == "google":
+        identity_token = str(token_payload.get("id_token") or "")
+        if not identity_token:
+            raise HTTPException(status_code=502, detail="Google did not return an identity token")
+        try:
+            from google.auth.transport.requests import Request as GoogleAuthRequest
+            from google.oauth2 import id_token as google_id_token
+
+            claims = google_id_token.verify_oauth2_token(
+                identity_token,
+                GoogleAuthRequest(),
+                provider_settings.client_id,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail="Google identity token verification failed") from exc
+        received_nonce = str(claims.get("nonce") or "")
+        if not received_nonce or not constant_time_equal(
+            sha256_text(received_nonce), expected_nonce_hash
+        ):
+            raise HTTPException(status_code=400, detail="Google identity nonce verification failed")
+        subject = str(claims.get("sub") or "")
+        email_verified = claims.get("email_verified") is True
+        email = (
+            str(claims.get("email") or "").strip() or None
+            if email_verified
+            else None
+        )
+        name = str(claims.get("name") or "").strip() or None
+        if not subject or len(subject) > 255:
+            raise HTTPException(status_code=502, detail="OAuth provider profile has no stable subject")
+        return ProviderIdentity(subject, email, name, email_verified)
+
     access_token = str(token_payload.get("access_token") or "")
     if not access_token:
         raise HTTPException(status_code=502, detail="OAuth provider did not return an access token")
@@ -149,15 +197,23 @@ def fetch_provider_identity(
         account = raw_profile.get("kakao_account") if isinstance(raw_profile.get("kakao_account"), dict) else {}
         kakao_profile = account.get("profile") if isinstance(account.get("profile"), dict) else {}
         subject = str(raw_profile.get("id") or "")
-        email = str(account.get("email") or "").strip() or None
+        email_verified = account.get("is_email_valid") is True and account.get("is_email_verified") is True
+        email = (
+            str(account.get("email") or "").strip() or None
+            if email_verified
+            else None
+        )
         name = str(kakao_profile.get("nickname") or "").strip() or None
     else:
-        subject = str(raw_profile.get("sub") or "")
-        email = str(raw_profile.get("email") or "").strip() or None
-        name = str(raw_profile.get("name") or "").strip() or None
+        raise HTTPException(status_code=422, detail="unsupported OAuth provider")
     if not subject or len(subject) > 255:
         raise HTTPException(status_code=502, detail="OAuth provider profile has no stable subject")
-    return ProviderIdentity(subject=subject, email=email, display_name=name)
+    return ProviderIdentity(
+        subject=subject,
+        email=email,
+        display_name=name,
+        email_verified=email_verified if provider == "kakao" else None,
+    )
 
 
 def complete_provider_callback(
@@ -190,7 +246,11 @@ def complete_provider_callback(
 
     try:
         identity = fetch_provider_identity(
-            settings, provider=provider, authorization_code=authorization_code, state=state
+            settings,
+            provider=provider,
+            authorization_code=authorization_code,
+            state=state,
+            expected_nonce_hash=str(flow["nonce_hash"] or ""),
         )
         exchange_code = random_token("oc_", 36)
         with connect(settings) as connection:
@@ -208,6 +268,14 @@ def complete_provider_callback(
                 email=identity.email,
                 display_name=identity.display_name,
                 link_user_id=str(flow["link_user_id"]) if flow["link_user_id"] else None,
+                email_verified=identity.email_verified,
+            )
+            record_auth_event(
+                connection,
+                event_type="oauth_identity_resolved",
+                user_id=user_id,
+                provider=provider,
+                detail={"explicitLink": bool(flow["link_user_id"])},
             )
             connection.execute(
                 """
@@ -231,9 +299,51 @@ def complete_provider_callback(
                 "UPDATE mobile_oauth_flows SET status = 'failed' WHERE state_hash = %s AND status = 'processing'",
                 (state_hash,),
             )
+            record_auth_event(
+                connection,
+                event_type="oauth_provider_failed",
+                provider=provider,
+            )
         raise
 
     query = urllib.parse.urlencode({"state": state, "provider": provider, "code": exchange_code})
+    separator = "&" if "?" in redirect_uri else "?"
+    return f"{redirect_uri}{separator}{query}"
+
+
+def cancel_provider_callback(
+    settings: PlatformSettings, *, provider: str, state: str
+) -> str:
+    """Consume a valid provider cancellation and return only to its stored URI."""
+    if provider not in SUPPORTED_PROVIDERS or not state:
+        raise HTTPException(status_code=400, detail="invalid OAuth callback")
+    state_hash = sha256_text(state)
+    with connect(settings) as connection:
+        assert_schema(connection)
+        flow = connection.execute(
+            "SELECT * FROM mobile_oauth_flows WHERE state_hash = %s FOR UPDATE",
+            (state_hash,),
+        ).fetchone()
+        if (
+            flow is None
+            or flow["provider"] != provider
+            or flow["status"] != "pending"
+            or flow["expires_at"] <= utcnow()
+        ):
+            raise HTTPException(status_code=400, detail="OAuth state is invalid or expired")
+        connection.execute(
+            "UPDATE mobile_oauth_flows SET status = 'failed', consumed_at = NOW() WHERE state_hash = %s",
+            (state_hash,),
+        )
+        record_auth_event(
+            connection,
+            event_type="oauth_cancelled",
+            provider=provider,
+        )
+        redirect_uri = str(flow["redirect_uri"])
+    query = urllib.parse.urlencode(
+        {"state": state, "provider": provider, "error": "access_denied"}
+    )
     separator = "&" if "?" in redirect_uri else "?"
     return f"{redirect_uri}{separator}{query}"
 
@@ -259,6 +369,14 @@ def exchange_auth_code(
                 "UPDATE mobile_auth_codes SET consumed_at = NOW() WHERE code_hash = %s",
                 (sha256_text(code),),
             )
+            record_auth_event(
+                connection,
+                event_type="authorization_code_rejected",
+                user_id=str(row["user_id"]),
+                provider=str(row["provider"]),
+                device_id=device_id,
+                detail={"reason": "pkce_mismatch"},
+            )
             connection.commit()
             raise HTTPException(status_code=401, detail="PKCE verification failed")
         connection.execute(
@@ -271,6 +389,22 @@ def exchange_auth_code(
             user_id=str(row["user_id"]),
             device_id=device_id,
         )
+        record_auth_event(
+            connection,
+            event_type="authorization_code_exchanged",
+            user_id=str(row["user_id"]),
+            provider=str(row["provider"]),
+            family_id=str(pair["familyId"]),
+            device_id=device_id,
+        )
         payload = profile_payload(connection, str(row["user_id"]))
-    payload.update({"accessToken": pair["accessToken"], "refreshToken": pair["refreshToken"]})
+    payload.update(
+        {
+            "accessToken": pair["accessToken"],
+            "refreshToken": pair["refreshToken"],
+            "tokenType": pair["tokenType"],
+            "accessTokenExpiresIn": pair["accessTokenExpiresIn"],
+            "refreshTokenExpiresIn": pair["refreshTokenExpiresIn"],
+        }
+    )
     return payload
