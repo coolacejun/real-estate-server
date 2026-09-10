@@ -10,6 +10,7 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import HTTPException
+from psycopg.types.json import Jsonb
 
 from .config import PlatformSettings
 from .repository import (
@@ -47,9 +48,12 @@ def begin_oauth(
     code_challenge: str,
     redirect_uri: str,
     link_user_id: str | None,
+    link_auth_binding: str | None = None,
 ) -> dict[str, str]:
     if provider not in SUPPORTED_PROVIDERS:
         raise HTTPException(status_code=422, detail="unsupported OAuth provider")
+    if link_user_id and not link_auth_binding:
+        raise HTTPException(403, 'authenticated account connection required')
     if (
         settings.app_env == "production"
         and settings.oauth_callback_base_url != "https://building-land.com"
@@ -72,8 +76,8 @@ def begin_oauth(
             """
             INSERT INTO mobile_oauth_flows
               (state_hash, provider, code_challenge, redirect_uri, link_user_id,
-               nonce_hash, expires_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+               nonce_hash, expires_at, link_auth_binding)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 state_hash,
@@ -83,6 +87,7 @@ def begin_oauth(
                 link_user_id,
                 nonce_hash,
                 utcnow() + timedelta(seconds=settings.oauth_state_ttl_seconds),
+                link_auth_binding,
             ),
         )
 
@@ -261,15 +266,17 @@ def complete_provider_callback(
             ).fetchone()
             if flow is None:
                 raise HTTPException(status_code=400, detail="OAuth state cannot be completed")
-            user_id = resolve_oauth_identity(
-                connection,
-                provider=provider,
-                subject=identity.subject,
-                email=identity.email,
-                display_name=identity.display_name,
-                link_user_id=str(flow["link_user_id"]) if flow["link_user_id"] else None,
-                email_verified=identity.email_verified,
-            )
+            pending_identity = None
+            if flow['link_user_id']:
+                # A provider callback alone is not proof of the initiating client.
+                # Attach only after its PKCE verifier AND original session return.
+                user_id = str(flow['link_user_id'])
+                pending_identity = {'subject': identity.subject, 'email': identity.email,
+                    'displayName': identity.display_name, 'emailVerified': identity.email_verified}
+            else:
+                user_id = resolve_oauth_identity(connection, provider=provider, subject=identity.subject,
+                    email=identity.email, display_name=identity.display_name, link_user_id=None,
+                    email_verified=identity.email_verified)
             record_auth_event(
                 connection,
                 event_type="oauth_identity_resolved",
@@ -280,12 +287,13 @@ def complete_provider_callback(
             connection.execute(
                 """
                 INSERT INTO mobile_auth_codes
-                  (code_hash, state_hash, user_id, provider, code_challenge, expires_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                  (code_hash, state_hash, user_id, provider, code_challenge, expires_at, pending_identity)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     sha256_text(exchange_code), state_hash, user_id, provider,
                     flow["code_challenge"], utcnow() + timedelta(seconds=settings.oauth_code_ttl_seconds),
+                    Jsonb(pending_identity) if pending_identity else None,
                 ),
             )
             connection.execute(
@@ -349,7 +357,8 @@ def cancel_provider_callback(
 
 
 def exchange_auth_code(
-    settings: PlatformSettings, *, code: str, code_verifier: str, device_id: str
+    settings: PlatformSettings, *, code: str, code_verifier: str, device_id: str,
+    link_session: dict | None = None,
 ) -> dict[str, Any]:
     if not code or not code_verifier:
         raise HTTPException(status_code=422, detail="code and codeVerifier are required")
@@ -379,6 +388,19 @@ def exchange_auth_code(
             )
             connection.commit()
             raise HTTPException(status_code=401, detail="PKCE verification failed")
+        if row['pending_identity']:
+            from .identity_connections import auth_binding, require_recent_auth
+            flow = connection.execute('SELECT link_auth_binding,status FROM mobile_oauth_flows WHERE state_hash=%s', (row['state_hash'],)).fetchone()
+            if (not link_session or link_session['user_id'] != str(row['user_id'])
+                    or flow['status'] != 'completed'
+                    or not constant_time_equal(auth_binding(link_session), flow['link_auth_binding'] or '')):
+                raise HTTPException(403, 'original account connection session required')
+            require_recent_auth(settings, link_session)
+            identity = row['pending_identity']
+            resolve_oauth_identity(connection, provider=row['provider'], subject=identity['subject'],
+                email=identity['email'], display_name=identity['displayName'],
+                email_verified=identity['emailVerified'], link_user_id=str(row['user_id']))
+            record_auth_event(connection, event_type='identity_connected', user_id=str(row['user_id']), provider=row['provider'])
         connection.execute(
             "UPDATE mobile_auth_codes SET consumed_at = NOW() WHERE code_hash = %s",
             (sha256_text(code),),

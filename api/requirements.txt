@@ -8,3 +8,4 @@ ijson
 reportlab>=4.2,<5
 cryptography>=50,<51
 google-auth[requests]>=2.35,<3
+pypdf>=6,<7

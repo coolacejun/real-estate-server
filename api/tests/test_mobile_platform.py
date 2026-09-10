@@ -428,6 +428,7 @@ class MobilePlatformContractTest(unittest.TestCase):
         code = parse_qs(urlparse(callback.headers["location"]).query)["code"][0]
         linked = self.client.post(
             "/api/mobile/v1/auth/token",
+            headers={"Authorization": f"Bearer {first['accessToken']}"},
             json={"code": code, "codeVerifier": verifier, "deviceId": "device-explicit-link-0001"},
         )
         self.assertEqual(linked.status_code, 200, linked.text)
@@ -457,13 +458,15 @@ class MobilePlatformContractTest(unittest.TestCase):
         account = self.client.post(
             "/api/internal/v1/web/accounts/resolve",
             headers=internal,
-            json={"externalId": "101", "email": "same@example.test", "displayName": "Web One"},
+            json={"externalId": "101", "email": "same@example.test", "displayName": "Web One",
+                  'provider': 'kakao', 'providerSubject': 'web-one', 'providerClientId': 'test-client', 'registrationConfirmed': True},
         )
         self.assertEqual(account.status_code, 200, account.text)
         other = self.client.post(
             "/api/internal/v1/web/accounts/resolve",
             headers=internal,
-            json={"externalId": "102", "email": "same@example.test", "displayName": "Web Two"},
+            json={"externalId": "102", "email": "same@example.test", "displayName": "Web Two",
+                  'provider': 'naver', 'providerSubject': 'web-two', 'providerClientId': 'test-client', 'registrationConfirmed': True},
         )
         self.assertEqual(other.status_code, 200, other.text)
         self.assertNotEqual(account.json()["userId"], other.json()["userId"])
@@ -476,6 +479,7 @@ class MobilePlatformContractTest(unittest.TestCase):
                 "displayName": "Web One",
                 "provider": "google",
                 "providerSubject": "web-explicit-google",
+                'providerClientId': 'test-client', 'explicitLink': True,
             },
         )
         self.assertEqual(linked.status_code, 200, linked.text)

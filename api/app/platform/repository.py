@@ -38,7 +38,7 @@ def connect(settings: PlatformSettings) -> Iterator[psycopg.Connection]:
 def assert_schema(connection: psycopg.Connection) -> None:
     try:
         row = connection.execute(
-            "SELECT version FROM schema_migrations WHERE version = '010_mobile_auth_hardening'"
+            "SELECT version FROM schema_migrations WHERE version = '012_identity_connections'"
         ).fetchone()
     except psycopg.Error as exc:
         raise HTTPException(status_code=503, detail="account database migration is required") from exc
@@ -100,18 +100,22 @@ def resolve_oauth_identity(
     lock_key = f"identity:{provider}:{subject}"
     connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (lock_key,))
     existing = connection.execute(
-        "SELECT user_id FROM platform_identities WHERE provider = %s AND provider_subject = %s",
+        "SELECT user_id,is_active FROM platform_identities WHERE provider = %s AND provider_subject = %s",
         (provider, subject),
     ).fetchone()
     if existing is not None:
         existing_user_id = str(existing["user_id"])
         if link_user_id and existing_user_id != link_user_id:
             raise HTTPException(status_code=409, detail="social account is linked to another user")
+        if not existing['is_active'] and not link_user_id:
+            raise HTTPException(409, 'identity is disconnected; sign in using another connected method')
+        if connection.execute("SELECT id FROM platform_users WHERE id=%s AND status='active' FOR UPDATE", (existing_user_id,)).fetchone() is None:
+            raise HTTPException(401, 'account is not active')
         connection.execute(
             """
             UPDATE platform_identities
             SET provider_email = %s, provider_display_name = %s,
-                provider_email_verified = %s, updated_at = NOW()
+                provider_email_verified = %s, updated_at = NOW(), is_active=TRUE, disconnected_at=NULL
             WHERE provider = %s AND provider_subject = %s
             """,
             (email, display_name, email_verified, provider, subject),
@@ -160,7 +164,7 @@ def resolve_oauth_identity(
 def profile_payload(connection: psycopg.Connection, user_id: str) -> dict[str, Any]:
     user = connection.execute(
         """
-        SELECT id, email, display_name, free_remaining, paid_remaining
+        SELECT id, email, display_name, free_remaining, paid_remaining, auth_version
         FROM platform_users WHERE id = %s AND status = 'active'
         """,
         (user_id,),
@@ -170,7 +174,7 @@ def profile_payload(connection: psycopg.Connection, user_id: str) -> dict[str, A
     identities = connection.execute(
         """
         SELECT provider, provider_email, provider_display_name, provider_email_verified
-        FROM platform_identities WHERE user_id = %s ORDER BY created_at
+        FROM platform_identities WHERE user_id = %s AND is_active ORDER BY created_at
         """,
         (user_id,),
     ).fetchall()
@@ -187,6 +191,7 @@ def profile_payload(connection: psycopg.Connection, user_id: str) -> dict[str, A
         "authenticated": True,
         "user": {
             "id": str(user["id"]),
+            "authVersion": int(user['auth_version']),
             "name": user["display_name"] or "",
             "displayName": user["display_name"] or "",
             "email": user["email"] or "",
@@ -680,7 +685,8 @@ def resolve_external_web_account(
             (provider, provider_subject),
         ).fetchone()
         if identity is not None:
-            user_id = str(identity["user_id"])
+            user_id = resolve_oauth_identity(connection, provider=provider, subject=provider_subject,
+                email=email, display_name=display_name, link_user_id=None)
         else:
             user_id = resolve_oauth_identity(
                 connection,

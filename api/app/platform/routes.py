@@ -115,6 +115,7 @@ def _pdf_response(
     *,
     archive_id: str | None = None,
     usage_id: str | None = None,
+    owner_user_id: str | None = None,
 ) -> Response:
     headers = {
         "X-Report-Schema-Version": str(canonical.report["schemaVersion"]),
@@ -123,12 +124,15 @@ def _pdf_response(
         "X-Report-Content-Hash": canonical.content_hash,
         "X-Report-Artifact-Sha256": sha256_bytes(data),
         "Cache-Control": "private, no-store",
+        'X-Content-Type-Options': 'nosniff',
         "Content-Disposition": 'attachment; filename="building-land-report.pdf"',
     }
     if archive_id:
         headers["X-Report-Archive-Id"] = archive_id
     if usage_id:
         headers["X-Report-Usage-Id"] = usage_id
+    if owner_user_id:
+        headers['X-Report-Owner-Id'] = owner_user_id
     return Response(data, media_type="application/pdf", headers=headers)
 
 
@@ -142,12 +146,16 @@ async def mobile_oauth_start(
     payload = _body(await request.json())
     link_requested = payload.get("linkAccount") is True
     session = _session(authorization) if link_requested else None
+    if session:
+        from .identity_connections import auth_binding, require_recent_auth
+        require_recent_auth(_settings(), session)
     result = begin_oauth(
         _settings(),
         provider=str(payload.get("provider") or "").lower(),
         code_challenge=str(payload.get("codeChallenge") or ""),
         redirect_uri=str(payload.get("redirectUri") or ""),
         link_user_id=session["user_id"] if session else None,
+        link_auth_binding=auth_binding(session) if session else None,
     )
     response.headers["Cache-Control"] = "no-store"
     return result
@@ -172,7 +180,7 @@ def mobile_oauth_callback(
 
 
 @router.post("/api/mobile/v1/auth/token")
-async def mobile_auth_token(request: Request, response: Response) -> dict[str, Any]:
+async def mobile_auth_token(request: Request, response: Response, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _rate_limit(request, "oauth-token", 20, 60)
     payload = _body(await request.json())
     device_id = str(payload.get("deviceId") or "")
@@ -183,6 +191,7 @@ async def mobile_auth_token(request: Request, response: Response) -> dict[str, A
         code=str(payload.get("code") or ""),
         code_verifier=str(payload.get("codeVerifier") or ""),
         device_id=device_id,
+        link_session=_session(authorization) if authorization else None,
     )
     response.headers["Cache-Control"] = "no-store"
     return result
@@ -298,12 +307,19 @@ async def mobile_store_restore(
     return await _store_request(request, authorization, restored=True)
 
 
+@router.post('/api/v1/reports/preview')
 @router.post("/api/mobile/v1/reports/preview")
 async def mobile_report_preview(
     request: Request, authorization: str | None = Header(default=None)
 ) -> Response:
     _rate_limit(request, "report-preview", 20, 60)
-    _session(authorization)
+    if request.url.path.startswith('/api/v1/'):
+        from .archives import require_enabled
+        from .shared_session import shared_session
+        require_enabled(_settings())
+        shared_session(_settings(), request)
+    else:
+        _session(authorization)
     payload = _body(await request.json())
     canonical = validate_canonical_report(
         payload.get("report"), requested_profile=payload.get("rendererProfile"),
@@ -313,12 +329,19 @@ async def mobile_report_preview(
     return _pdf_response(data, canonical)
 
 
+@router.post('/api/v1/reports/final')
 @router.post("/api/mobile/v1/reports/final")
 async def mobile_report_final(
     request: Request, authorization: str | None = Header(default=None)
 ) -> Response:
     _rate_limit(request, "report-final", 12, 60)
-    session = _session(authorization)
+    if request.url.path.startswith('/api/v1/'):
+        from .archives import require_enabled
+        from .shared_session import shared_session
+        require_enabled(_settings())
+        session = shared_session(_settings(), request)
+    else:
+        session = _session(authorization)
     payload = _body(await request.json())
     canonical = validate_canonical_report(
         payload.get("report"),
@@ -335,7 +358,7 @@ async def mobile_report_final(
         archive, stored = load_archive(settings, user_id=session["user_id"], archive_id=str(usage["archive_id"]))
         data = render_pdf(settings, stored, asset_manifest=archive["asset_manifest"])
         return _pdf_response(
-            data, stored, archive_id=str(archive["id"]), usage_id=str(usage["id"])
+            data, stored, archive_id=str(archive["id"]), usage_id=str(usage["id"]), owner_user_id=session['user_id']
         )
     try:
         stored_report, assets = materialize_assets(
@@ -359,22 +382,29 @@ async def mobile_report_final(
         fail_final_usage(settings, str(usage["id"]), "renderer_failure")
         raise HTTPException(status_code=500, detail="report generation failed") from exc
     return _pdf_response(
-        data, canonical, archive_id=archive_id, usage_id=str(usage["id"])
+        data, canonical, archive_id=archive_id, usage_id=str(usage["id"]), owner_user_id=session['user_id']
     )
 
 
 @router.get("/api/report-archive")
 def mobile_archive_list(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     session = _session(authorization)
+    if _settings().shared_archives_enabled:
+        from .archives import list_items
+        return list_items(_settings(), session['user_id'], limit=100)
     return {"items": list_archives(_settings(), user_id=session["user_id"])}
 
 
 @router.get("/api/report-archive/content")
 def mobile_archive_content(
+    request: Request,
     id: str = Query(...),
     format: str = Query("pdf"),
     authorization: str | None = Header(default=None),
 ) -> Response:
+    if _settings().shared_archives_enabled:
+        from .archive_routes import archive_content
+        return archive_content(id, request, format)
     session = _session(authorization)
     settings = _settings()
     archive, canonical = load_archive(settings, user_id=session["user_id"], archive_id=id)
@@ -418,6 +448,38 @@ async def internal_web_account_resolve(
     settings = _settings()
     with connect(settings) as connection:
         assert_schema(connection)
+        provider = str(payload.get('provider') or '').lower()
+        subject = str(payload.get('providerSubject') or '')
+        connection.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))', (f'web-account:{external_id}',))
+        connection.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))', (f'identity:{provider}:{subject}',))
+        mapped = connection.execute("SELECT user_id FROM platform_external_accounts WHERE namespace='web' AND external_id=%s", (external_id,)).fetchone()
+        identity = connection.execute('SELECT user_id,is_active FROM platform_identities WHERE provider=%s AND provider_subject=%s', (provider, subject)).fetchone()
+        reason = None
+        if provider not in ('kakao', 'naver', 'google') or not subject:
+            reason = 'verified_provider_required'
+        elif str(payload.get('providerClientId') or '') != settings.provider(provider).client_id:
+            reason = 'provider_scope_mismatch'
+        elif not mapped and payload.get('registrationConfirmed') is not True:
+            reason = 'existing_web_account_requires_reviewed_mapping'
+        elif not mapped and identity and not identity['is_active']:
+            reason = 'disconnected_identity_requires_original_account'
+        elif mapped and identity and str(mapped['user_id']) != str(identity['user_id']):
+            reason = 'different_central_accounts'
+        elif mapped and (not identity or not identity['is_active']) and payload.get('explicitLink') is not True:
+            reason = 'explicit_account_connection_required'
+        elif payload.get('legacyPaidRemaining'):
+            # Transfer of existing value belongs to an audited migration plan.
+            migrated = connection.execute('SELECT delta FROM platform_credit_ledger WHERE idempotency_key=%s', (f'web-balance-migration:{external_id}',)).fetchone()
+            if migrated is None or migrated['delta'] != payload['legacyPaidRemaining']:
+                reason = 'legacy_balance_requires_reviewed_migration'
+        if reason:
+            from .repository import new_id
+            from .security import sha256_text
+            connection.execute('''INSERT INTO platform_account_review_queue(id,source_key,reason)
+                VALUES (%s,%s,%s) ON CONFLICT(source_key) DO NOTHING''',
+                (new_id(), sha256_text(f'web:{external_id}:{provider}:{subject}:{reason}'), reason))
+            connection.commit()
+            raise HTTPException(409, reason)
         user_id = resolve_external_web_account(
             connection,
             external_id=external_id,
@@ -433,19 +495,15 @@ async def internal_web_account_resolve(
             raise HTTPException(status_code=422, detail="legacyPaidRemaining must be an integer") from exc
         if legacy_paid < 0 or legacy_paid > 1_000_000:
             raise HTTPException(status_code=422, detail="legacyPaidRemaining is outside the allowed range")
-        if legacy_paid:
-            grant_paid_credits(
-                connection,
-                user_id=user_id,
-                credits=legacy_paid,
-                reason="web_balance_migration",
-                idempotency_key=f"web-balance-migration:{external_id}",
-                reference_type="web_account",
-                reference_id=external_id,
-                metadata={"source": "legacy_web_sqlite"},
-            )
         profile = profile_payload(connection, user_id)
     return {"userId": user_id, **profile}
+
+
+@router.get('/api/internal/v1/web/accounts/{external_id}/profile')
+def internal_web_profile(external_id: str, x_internal_service_token: str | None = Header(default=None)):
+    _internal_auth(x_internal_service_token)
+    with connect(_settings()) as connection:
+        return profile_payload(connection, _web_user_id(connection, external_id))
 
 
 @router.get("/api/internal/v1/web/accounts/{external_id}/credits")

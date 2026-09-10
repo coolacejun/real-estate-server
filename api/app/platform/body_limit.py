@@ -13,6 +13,14 @@ class RequestBodyLimitMiddleware:
 
     @staticmethod
     def _limit(path: str) -> int | None:
+        if path.startswith('/api/v1/report-archives/uploads/') and path.endswith('/content'):
+            return 16 * 1024 * 1024
+        if path == '/api/v1/report-archives':
+            return 16 * 1024 * 1024
+        if path.startswith('/api/v1/report-archives') or path.startswith('/api/v1/account/'):
+            return 64 * 1024
+        if path.startswith('/api/v1/reports/'):
+            return get_settings().report_max_body_bytes
         if path.startswith("/api/mobile/v1/reports/"):
             return get_settings().report_max_body_bytes
         if path.startswith("/api/mobile/v1/store/"):
@@ -29,6 +37,12 @@ class RequestBodyLimitMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
+        if str(scope.get('path', '')).startswith('/api/mobile/v1/auth/oauth/callback/'):
+            # Uvicorn retains the outer scope for its access log. Keep the query
+            # available only in the private request copy passed to the router.
+            private_scope = dict(scope)
+            scope['query_string'] = b''
+            scope = private_scope
         limit = self._limit(str(scope.get("path") or ""))
         if limit is None:
             await self.app(scope, receive, send)

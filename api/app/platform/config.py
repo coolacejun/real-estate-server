@@ -64,6 +64,11 @@ class PlatformSettings:
     naver: ProviderSettings
     google: ProviderSettings
     environment_analysis_enabled: bool = False
+    shared_archives_enabled: bool = False
+    archive_uploads_enabled: bool = False
+    web_session_cookie_name: str = 'bl_session'
+    web_session_introspection_url: str = 'http://web:5180/api/internal/platform-session'
+    shared_web_origins: tuple[str, ...] = ('https://building-land.com', 'https://www.building-land.com')
 
     @classmethod
     def from_env(cls) -> "PlatformSettings":
@@ -118,6 +123,11 @@ class PlatformSettings:
             google_play_service_account_file=os.getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_FILE", "").strip(),
             environment_data_dir=Path(os.getenv("ENVIRONMENT_DATA_DIR", "/data/environment")).resolve(),
             environment_analysis_enabled=os.getenv("ENVIRONMENT_ANALYSIS_ENABLED", "false").strip().lower() == "true",
+            shared_archives_enabled=os.getenv('SHARED_ARCHIVES_ENABLED', 'false').lower() == 'true',
+            archive_uploads_enabled=os.getenv('ARCHIVE_UPLOADS_ENABLED', 'false').lower() == 'true',
+            web_session_cookie_name=os.getenv('SESSION_COOKIE_NAME', 'bl_session'),
+            web_session_introspection_url=os.getenv('WEB_SESSION_INTROSPECTION_URL', 'http://web:5180/api/internal/platform-session'),
+            shared_web_origins=_csv('SHARED_WEB_ORIGINS', 'https://building-land.com,https://www.building-land.com'),
             internal_service_token=os.getenv("PLATFORM_INTERNAL_SERVICE_TOKEN", "").strip(),
             kakao=ProviderSettings(
                 # The *_OAUTH_* names are explicit mobile overrides. The
