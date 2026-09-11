@@ -14,6 +14,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
@@ -229,6 +230,93 @@ class SharedArchiveContractTest(unittest.TestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(self.sql("SELECT * FROM platform_external_accounts WHERE external_id='new-web'"), [])
         self.assertEqual(len(self.sql('SELECT * FROM platform_account_review_queue')), 1)
+
+    def email_registration(self, external_id='email-new', **changes):
+        payload = {'externalId': external_id, 'provider': 'web_email', 'providerSubject': f'web:{external_id}',
+                   'email': 'same@example.test', 'emailVerified': True, 'registrationConfirmed': True,
+                   'legacyPaidRemaining': 0, **changes}
+        return self.client.post('/api/internal/v1/web/accounts/resolve',
+            headers={'X-Internal-Service-Token': self.settings.internal_service_token}, json=payload)
+
+    def test_web_email_registration_is_concurrent_idempotent_and_never_merges_by_email(self):
+        original = self.sql('SELECT * FROM platform_credit_ledger WHERE user_id=%s ORDER BY id', (self.owner,))
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            responses = list(pool.map(lambda _: self.email_registration(), range(5)))
+        for response in responses:
+            self.assertEqual(response.status_code, 200, response.text)
+        owners = {response.json()['userId'] for response in responses}
+        self.assertEqual(len(owners), 1)
+        owner = owners.pop()
+        self.assertNotIn(owner, (self.owner, self.other))
+        self.assertEqual(self.sql('SELECT delta FROM platform_credit_ledger WHERE user_id=%s', (owner,)), [{'delta': 3}])
+        identity = self.sql('SELECT provider,provider_subject,provider_email_verified FROM platform_identities WHERE user_id=%s', (owner,))[0]
+        self.assertEqual(identity, {'provider': 'web_email', 'provider_subject': 'web:email-new', 'provider_email_verified': True})
+        self.assertEqual(self.sql('SELECT * FROM platform_credit_ledger WHERE user_id=%s ORDER BY id', (self.owner,)), original)
+        other = self.email_registration('email-second')
+        self.assertEqual(other.status_code, 200, other.text)
+        self.assertNotEqual(other.json()['userId'], owner)
+
+    def test_email_proof_subject_and_legacy_value_fail_closed(self):
+        ledger = self.sql('SELECT * FROM platform_credit_ledger ORDER BY id')
+        for changes in ({'emailVerified': False}, {'providerSubject': 'web:another-owner'}, {'legacyPaidRemaining': 4}):
+            response = self.email_registration(**changes)
+            self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.sql('SELECT * FROM platform_credit_ledger ORDER BY id'), ledger)
+        self.assertEqual(self.sql("SELECT * FROM platform_external_accounts WHERE external_id='email-new'"), [])
+
+    def test_legacy_email_cannot_claim_a_second_initial_grant_in_either_flag_mode(self):
+        ledger = self.sql('SELECT * FROM platform_credit_ledger ORDER BY id')
+        with patch('app.platform.routes._settings', return_value=replace(self.settings, shared_archives_enabled=False)):
+            off = self.email_registration('legacy-off', registrationConfirmed=False, legacyRegistration=True)
+        self.assertEqual(off.status_code, 409, off.text)
+        on = self.email_registration('legacy-on', registrationConfirmed=False, legacyRegistration=True)
+        self.assertEqual(on.status_code, 409, on.text)
+        self.assertEqual(self.sql("SELECT * FROM platform_external_accounts WHERE external_id IN ('legacy-on','legacy-off')"), [])
+        self.assertEqual(self.sql('SELECT * FROM platform_credit_ledger ORDER BY id'), ledger)
+
+    def test_registered_email_does_not_move_existing_provider_or_archive_ownership(self):
+        email_owner = self.email_registration().json()['userId']
+        archive_id = self.finish(self.upload()).json()['id']
+        ledger = self.sql('SELECT * FROM platform_credit_ledger ORDER BY id')
+        response = self.client.post('/api/internal/v1/web/accounts/resolve',
+            headers={'X-Internal-Service-Token': self.settings.internal_service_token},
+            json={'externalId': 'email-new', 'provider': 'kakao', 'providerSubject': 'owner',
+                  'providerClientId': 'test-client', 'explicitLink': True})
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(str(self.sql("SELECT user_id FROM platform_external_accounts WHERE external_id='email-new'")[0]['user_id']), email_owner)
+        self.assertEqual(self.client.get(f'/api/v1/report-archives/{archive_id}', headers=self.headers).status_code, 200)
+        self.assertEqual(self.sql('SELECT * FROM platform_credit_ledger ORDER BY id'), ledger)
+
+    def test_actual_web_email_registration_payload_reaches_central_identity_and_replays(self):
+        web_root = Path(os.environ['SHARED_WEB_REPO'])
+        sys.path.insert(0, str(web_root))
+        spec = importlib.util.spec_from_file_location('email_web_contract', web_root / 'server.py')
+        web = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(web)
+        def resolve(payload):
+            response = self.client.post('/api/internal/v1/web/accounts/resolve',
+                headers={'X-Internal-Service-Token': self.settings.internal_service_token}, json=payload)
+            if response.status_code != 200:
+                raise web.platform_ledger.PlatformAccountError(response.json()['detail'], response.status_code)
+            return response.json()
+        try:
+            with tempfile.TemporaryDirectory() as temporary, \
+                 patch.object(web.platform_ledger, 'enabled', return_value=True), \
+                 patch.object(web.platform_ledger, 'resolve_account', side_effect=resolve), \
+                 patch.object(web.platform_ledger, 'credit_summary', return_value={'freeRemaining': 3, 'paidRemaining': 0}):
+                web.DB_PATH = Path(temporary) / 'email.sqlite3'
+                web.init_auth_db()
+                user = web.create_user('same@example.test', 'Email', 'email', web.hash_password('Synthetic-password-123'), email_verified_at=web.now_iso())
+                for flag in (False, True):
+                    with patch.object(web, 'SHARED_ARCHIVES_ENABLED', flag), \
+                         patch.object(web.platform_ledger, 'account_profile', return_value={'socialAccounts': [{'provider': 'web_email'}]}):
+                        result = web.build_me_payload(user['id'])
+                        owner = result['user']['platformUserId']
+                        self.assertNotIn(owner, (self.owner, self.other))
+                        self.assertEqual(str(self.sql("SELECT user_id FROM platform_external_accounts WHERE external_id=%s", (str(user['id']),))[0]['user_id']), owner)
+                self.assertEqual(self.sql('SELECT delta FROM platform_credit_ledger WHERE user_id=%s', (owner,)), [{'delta': 3}])
+        finally:
+            sys.path.remove(str(web_root))
 
     def test_normal_final_is_one_debit_and_visible_through_legacy_and_common_routes(self):
         report = {'schemaVersion': 1, 'rendererVersion': 'web-a4-canonical-v1', 'mappingVersion': 'mobile-v1',

@@ -654,6 +654,7 @@ def resolve_external_web_account(
     display_name: str | None,
     provider: str | None,
     provider_subject: str | None,
+    email_verified: bool | None = None,
 ) -> str:
     connection.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
@@ -665,7 +666,7 @@ def resolve_external_web_account(
     ).fetchone()
     if link is not None:
         user_id = str(link["user_id"])
-        if provider in {"kakao", "naver", "google"} and provider_subject:
+        if provider in {"kakao", "naver", "google", "web_email"} and provider_subject:
             # Re-resolving an already mapped web account is the explicit bridge
             # operation used after an authenticated social-account link.
             resolve_oauth_identity(
@@ -675,18 +676,19 @@ def resolve_external_web_account(
                 email=email,
                 display_name=display_name,
                 link_user_id=user_id,
+                email_verified=email_verified,
             )
         return user_id
 
     user_id: str | None = None
-    if provider in {"kakao", "naver", "google"} and provider_subject:
+    if provider in {"kakao", "naver", "google", "web_email"} and provider_subject:
         identity = connection.execute(
             "SELECT user_id FROM platform_identities WHERE provider = %s AND provider_subject = %s",
             (provider, provider_subject),
         ).fetchone()
         if identity is not None:
             user_id = resolve_oauth_identity(connection, provider=provider, subject=provider_subject,
-                email=email, display_name=display_name, link_user_id=None)
+                email=email, display_name=display_name, link_user_id=None, email_verified=email_verified)
         else:
             user_id = resolve_oauth_identity(
                 connection,
@@ -695,6 +697,7 @@ def resolve_external_web_account(
                 email=email,
                 display_name=display_name,
                 link_user_id=None,
+                email_verified=email_verified,
             )
     if user_id is None:
         # Email is profile data, never an account-merge key.

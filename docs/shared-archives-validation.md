@@ -1,5 +1,8 @@
 # Validation record — 2026-09-11
 
+This records the initial implementation. The subsequent email compatibility fix,
+updated web pin and publication gate are recorded in `shared-archives-followup.md`.
+
 Scope: isolated server/web/mobile branches; synthetic data only. No push,
 deployment, real identity login, migration against user data, purchase or charge.
 

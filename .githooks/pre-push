@@ -1,0 +1,19 @@
+#!/bin/sh
+# Only this coordinated feature branch is guarded; no remote writes are made here.
+set -eu
+repo=$(git rev-parse --show-toplevel)
+if [ -n "${SHARED_RELEASE_PYTHON:-}" ]; then
+  python_bin=$SHARED_RELEASE_PYTHON
+elif command -v python3 >/dev/null 2>&1; then
+  python_bin=python3
+else
+  python_bin=python
+fi
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/work/shared-archives-20260911)
+      [ "$local_sha" != 0000000000000000000000000000000000000000 ] || continue
+      "$python_bin" "$repo/scripts/check_shared_release.py" --repo "$repo" --server-ref "$local_sha"
+      ;;
+  esac
+done

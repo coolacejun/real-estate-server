@@ -454,10 +454,12 @@ async def internal_web_account_resolve(
         connection.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))', (f'identity:{provider}:{subject}',))
         mapped = connection.execute("SELECT user_id FROM platform_external_accounts WHERE namespace='web' AND external_id=%s", (external_id,)).fetchone()
         identity = connection.execute('SELECT user_id,is_active FROM platform_identities WHERE provider=%s AND provider_subject=%s', (provider, subject)).fetchone()
+        verified_web_email = (provider == 'web_email' and subject == f'web:{external_id}'
+            and payload.get('emailVerified') is True and bool(str(payload.get('email') or '').strip()))
         reason = None
-        if provider not in ('kakao', 'naver', 'google') or not subject:
+        if not verified_web_email and (provider not in ('kakao', 'naver', 'google') or not subject):
             reason = 'verified_provider_required'
-        elif str(payload.get('providerClientId') or '') != settings.provider(provider).client_id:
+        elif provider != 'web_email' and str(payload.get('providerClientId') or '') != settings.provider(provider).client_id:
             reason = 'provider_scope_mismatch'
         elif not mapped and payload.get('registrationConfirmed') is not True:
             reason = 'existing_web_account_requires_reviewed_mapping'
@@ -487,6 +489,7 @@ async def internal_web_account_resolve(
             display_name=str(payload.get("displayName") or "").strip() or None,
             provider=str(payload.get("provider") or "").lower() or None,
             provider_subject=str(payload.get("providerSubject") or "").strip() or None,
+            email_verified=verified_web_email,
         )
         legacy_paid_raw = payload.get("legacyPaidRemaining", 0)
         try:
