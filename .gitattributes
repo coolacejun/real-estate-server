@@ -1,0 +1,2 @@
+# Keep the publication hook executable on Windows and POSIX checkouts.
+.githooks/* text eol=lf
