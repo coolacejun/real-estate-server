@@ -32,9 +32,9 @@ def git(repo: Path, *args: str) -> str:
 
 def verify_manifest(web: Path) -> None:
     manifest = json.loads((web / 'report-renderer-manifest.json').read_text(encoding='utf-8'))
-    if manifest.get('version') != 'web-a4-shared-v3-20260909':
+    if manifest.get('version') != 'web-a4-shared-v3-20260912':
         raise ReleaseBlocked('Web V3 renderer bundle is not compatible')
-    if not {'canonical_v3_contract.py', 'mobile_report_renderer.py', 'script.js'} <= set(manifest.get('assets', {})):
+    if not {'canonical_v3_contract.py', 'mobile_report_renderer.py', 'script.js', 'environment_analysis.py', 'client-bridge.js'} <= set(manifest.get('assets', {})):
         raise ReleaseBlocked('Web V3 renderer assets are missing')
     for group, prefix in (('assets', ''), ('fonts', 'assets/fonts/pretendard/')):
         for name, digest in manifest[group].items():
@@ -44,6 +44,20 @@ def verify_manifest(web: Path) -> None:
     contract = (web / 'canonical_v3_contract.py').read_text(encoding='utf-8')
     if 'RENDERER_VERSION = "web-a4-canonical-v3"' not in contract:
         raise ReleaseBlocked('Web semantic report contract is not V3')
+
+
+def verify_environment_contract(repo: Path, web: Path) -> None:
+    if (repo / 'api/app/platform/shared_environment.py').read_bytes() != (web / 'environment_analysis.py').read_bytes():
+        raise ReleaseBlocked('Server environment calculations differ from the pinned web source')
+    if (repo / 'api/app/platform/environment-data-manifest.json').read_bytes() != (web / 'environment-data-manifest.json').read_bytes():
+        raise ReleaseBlocked('Server environment datasets differ from the pinned web contract')
+    data_manifest = json.loads((web / 'environment-data-manifest.json').read_text(encoding='utf-8'))
+    if data_manifest.get('calculationVersion') != 'environment-web-v2':
+        raise ReleaseBlocked('Environment data contract version is not V2')
+    for name, digest in data_manifest['files'].items():
+        path = (web / 'data' / name).resolve()
+        if not path.is_relative_to((web / 'data').resolve()) or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ReleaseBlocked('Pinned environment dataset bytes are inconsistent')
 
 
 def verify_remote_pin(pin: str, listing: str) -> None:
@@ -75,6 +89,7 @@ def check(repo: Path, *, local_only: bool = False, server_ref: str = 'HEAD') -> 
     if git(web, 'status', '--porcelain', '--untracked-files=no'):
         raise ReleaseBlocked('Pinned web checkout is modified')
     verify_manifest(web)
+    verify_environment_contract(repo, web)
     if not local_only:
         verify_remote_pin(pin, git(repo, 'ls-remote', WEB_REMOTE, WEB_BRANCH))
     return {'serverCommit': current, 'webCommit': pin, 'webRemote': WEB_REMOTE,

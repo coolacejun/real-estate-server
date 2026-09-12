@@ -1,2 +1,4 @@
 # Keep the publication hook executable on Windows and POSIX checkouts.
 .githooks/* text eol=lf
+api/app/platform/shared_environment.py text eol=lf
+api/app/platform/environment-data-manifest.json text eol=lf

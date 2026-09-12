@@ -15,6 +15,7 @@ from typing import Any, Iterable
 from fastapi import HTTPException
 
 from .config import PlatformSettings
+from . import shared_environment
 
 
 # Reads can outlive an HTTP timeout. Slots are released when the underlying
@@ -693,6 +694,16 @@ def analyze_environment(settings: PlatformSettings, payload: object) -> dict[str
 
 
 def _analyze_environment(settings: PlatformSettings, payload: object) -> dict[str, Any]:
+    if isinstance(payload, dict) and payload.get("calculationVersion") == shared_environment.CALCULATION_VERSION:
+        try:
+            result = shared_environment.analyze_environment_request(payload, data_root=settings.environment_data_dir)
+        except shared_environment.EnvironmentAnalysisValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail="environment analysis is unavailable") from exc
+        if not any(category.get("status") == "ok" for category in result["categories"].values()):
+            raise HTTPException(status_code=503, detail="environment datasets are unavailable")
+        return result
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="request body must be an object")
     location = payload.get("location") if isinstance(payload.get("location"), dict) else {}

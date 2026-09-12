@@ -3,6 +3,9 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
+import hashlib
+import json
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('shared_release_guard', Path(__file__).resolve().parents[2] / 'scripts/check_shared_release.py')
@@ -11,6 +14,22 @@ spec.loader.exec_module(guard)
 
 
 class SharedReleaseGuardTest(unittest.TestCase):
+    def test_environment_code_and_dataset_drift_block_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);web=root/'web';api=root/'api/app/platform'
+            (web/'data').mkdir(parents=True);api.mkdir(parents=True)
+            (web/'environment_analysis.py').write_bytes(b'shared calculator')
+            (api/'shared_environment.py').write_bytes(b'shared calculator')
+            data=web/'data/rail-stations.csv';data.write_bytes(b'pinned rail dataset')
+            manifest=json.dumps({'calculationVersion':'environment-web-v2','files':{'rail-stations.csv':hashlib.sha256(data.read_bytes()).hexdigest()}}).encode()
+            for parent in (api,web): (parent/'environment-data-manifest.json').write_bytes(manifest)
+            guard.verify_environment_contract(root,web)
+            (api/'shared_environment.py').write_bytes(b'different formatter')
+            with self.assertRaises(guard.ReleaseBlocked):guard.verify_environment_contract(root,web)
+            (api/'shared_environment.py').write_bytes(b'shared calculator')
+            data.write_bytes(b'unreviewed rail dataset')
+            with self.assertRaises(guard.ReleaseBlocked):guard.verify_environment_contract(root,web)
+
     def test_unpublished_wrong_commit_or_wrong_ref_blocks(self):
         pin = 'a' * 40
         for listing in ('', f"{'b'*40}\t{guard.WEB_BRANCH}", f'{pin}\trefs/heads/main'):
