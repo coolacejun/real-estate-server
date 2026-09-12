@@ -32,7 +32,7 @@ def git(repo: Path, *args: str) -> str:
 
 def verify_manifest(web: Path) -> None:
     manifest = json.loads((web / 'report-renderer-manifest.json').read_text(encoding='utf-8'))
-    if manifest.get('version') != 'web-a4-shared-v3-20260912':
+    if manifest.get('version') != 'web-a4-shared-v3-20260913':
         raise ReleaseBlocked('Web V3 renderer bundle is not compatible')
     if not {'canonical_v3_contract.py', 'mobile_report_renderer.py', 'script.js', 'environment_analysis.py', 'client-bridge.js'} <= set(manifest.get('assets', {})):
         raise ReleaseBlocked('Web V3 renderer assets are missing')
