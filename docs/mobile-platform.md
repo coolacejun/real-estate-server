@@ -40,7 +40,7 @@ Each user/store pair receives a UUID account token. iOS must send it as StoreKit
 - `buildingland.report_credits_30`
 - `buildingland.report_credits_50`
 
-The 60- and 90-credit IDs remain visible as disabled/retired compatibility records and are rejected with 410 for new purchases. `remove_ads_monthly` is accepted only by restore as a legacy entitlement and never grants report credits. Apple verification validates the application, product, transaction, account token, revocation state and signed certificate chain (or the legacy receipt endpoint). Google Play verification uses the Android Publisher API and records the grant before a retryable consume call; the legacy non-consumable uses acknowledgement instead. Store transaction identity and receipt digest are both unique, so retries and concurrent delivery cannot grant twice.
+The 60- and 90-credit IDs remain visible as disabled/retired compatibility records and are rejected with 410 for new purchases. `remove_ads_monthly` is restore-only. The separately configured [legacy migration v1](legacy-store-migration-v1.md) is disabled by default; when enabled for an evidenced historical SKU, fresh verified and account-bound purchases receive ten additional credits exactly once while ad removal is preserved. Apple verification validates the application, product, transaction, account token, revocation state and signed certificate chain (or the legacy receipt endpoint). Google Play verification uses the Android Publisher API and records the grant before a retryable consume call; the legacy non-consumable uses acknowledgement instead. Store transaction identity and receipt digest are both unique, so retries and concurrent delivery cannot grant twice.
 
 Reports:
 

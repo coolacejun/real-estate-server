@@ -69,12 +69,30 @@ class PlatformSettings:
     web_session_cookie_name: str = 'bl_session'
     web_session_introspection_url: str = 'http://web:5180/api/internal/platform-session'
     shared_web_origins: tuple[str, ...] = ('https://building-land.com', 'https://www.building-land.com')
+    legacy_grant_enabled: bool = False
+    legacy_notifications_enabled: bool = False
+    legacy_policy_file: str = ''
+    apple_iap_key_file: str = ''
+    apple_iap_key_id: str = ''
+    apple_iap_issuer_id: str = ''
+    apple_app_id: str = ''
+    google_rtdn_audience: str = ''
+    google_rtdn_email: str = ''
 
     @classmethod
     def from_env(cls) -> "PlatformSettings":
         database_url = os.getenv("DATABASE_URL", "").strip()
         return cls(
             database_url=database_url,
+            legacy_grant_enabled=os.getenv('LEGACY_GRANT_ENABLED', 'false').lower() == 'true',
+            legacy_notifications_enabled=os.getenv('LEGACY_NOTIFICATIONS_ENABLED', 'false').lower() == 'true',
+            legacy_policy_file=os.getenv('LEGACY_POLICY_FILE', ''),
+            apple_iap_key_file=os.getenv('APPLE_IAP_KEY_FILE', ''),
+            apple_iap_key_id=os.getenv('APPLE_IAP_KEY_ID', ''),
+            apple_iap_issuer_id=os.getenv('APPLE_IAP_ISSUER_ID', ''),
+            apple_app_id=os.getenv('APPLE_APP_ID', ''),
+            google_rtdn_audience=os.getenv('GOOGLE_RTDN_AUDIENCE', ''),
+            google_rtdn_email=os.getenv('GOOGLE_RTDN_EMAIL', ''),
             app_env=os.getenv("APP_ENV", "production").strip().lower(),
             oauth_callback_base_url=os.getenv(
                 "MOBILE_OAUTH_CALLBACK_BASE_URL", "https://building-land.com"

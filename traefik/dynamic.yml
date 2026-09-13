@@ -3,7 +3,7 @@ http:
     platform-api:
       rule: >-
         (Host(`building-land.com`) || Host(`www.building-land.com`)) &&
-        (PathPrefix(`/api/mobile/v1`) || Path(`/api/v1/environment-analysis`) ||
+        (PathPrefix(`/api/mobile/v1`) || PathPrefix(`/api/store/legacy/v1/notifications/`) || Path(`/api/v1/environment-analysis`) ||
         PathPrefix(`/api/v1/report-archives`) || PathPrefix(`/api/v1/reports/`) ||
         PathPrefix(`/api/v1/account/`) ||
         (PathPrefix(`/api/report-archive`) && HeaderRegexp(`Authorization`, `(?i)^Bearer[ ]+.+`)))

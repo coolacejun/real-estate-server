@@ -128,7 +128,7 @@ paths:
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/mobile/v1/store/restore:
     post:
-      summary: Restore the retired remove_ads_monthly entitlement without credit grant
+      summary: Restore legacy ad removal and, when enabled and eligible, grant migration v1 credits once
       security: [{bearerAuth: []}]
       requestBody:
         required: true
@@ -138,6 +138,32 @@ paths:
       responses:
         '200': {$ref: '#/components/responses/StoreResult'}
         '422': {$ref: '#/components/responses/ValidationError'}
+        '409': {description: Account binding review or ownership conflict}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/mobile/v1/store/legacy-migration/v1:
+    get:
+      summary: Read the authenticated account's immutable legacy grants and reconciliation state
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Migration version and purchases with productId, status, creditsGranted, reconciliationCredits
+        '401': {description: Authentication required}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/store/legacy/v1/notifications/apple:
+    post:
+      summary: Verify production Apple signedPayload and reconcile REFUND or REVOKE once
+      responses:
+        '200': {description: Applied, already applied, or unrelated notification}
+        '422': {description: Signature, application, environment, or payload rejected}
+        '503': {description: Disabled or temporarily unavailable; retry delivery}
+  /api/store/legacy/v1/notifications/google:
+    post:
+      summary: Verify PubSub OIDC audience and service account then reconcile one-time canceled or voided purchase
+      responses:
+        '200': {description: Applied, already applied, or unrelated notification}
+        '403': {description: Push authentication failed}
+        '422': {description: Package or payload rejected}
+        '503': {description: Disabled or identity unavailable; retry delivery}
   /api/mobile/v1/reports/preview:
     post:
       summary: Render an uncharged canonical preview PDF
@@ -354,6 +380,14 @@ components:
               creditsGranted: {type: integer}
               alreadyProcessed: {type: boolean}
               creditSummary: {$ref: '#/components/schemas/CreditSummary'}
+              legacyMigration:
+                type: object
+                description: Present for enabled allowlisted migration restores; creditsGranted is new credits in this response
+                properties:
+                  version: {type: integer, enum: [1]}
+                  status: {type: string, enum: [granted, already_granted]}
+                  creditsGranted: {type: integer, enum: [0, 10]}
+                  alreadyProcessed: {type: boolean}
     Pdf:
       description: Transient generated PDF with content and per-response byte hashes in headers
       headers:

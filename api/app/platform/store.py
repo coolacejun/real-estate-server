@@ -359,6 +359,18 @@ def process_purchase(
     transaction_id: str | None,
     restored: bool,
 ) -> dict[str, Any]:
+    if restored and settings.legacy_grant_enabled:
+        from .legacy_verifier import rules
+        if any(r.platform == platform and r.product_id == product_id for r in rules(settings)):
+            from .legacy_migration import process_legacy
+            migration = process_legacy(settings, user_id=user_id, platform=platform,
+                product_id=product_id, verification_data=verification_data, transaction_id=transaction_id)
+            if migration['status'] == 'revoked':
+                raise HTTPException(422, 'legacy purchase was revoked')
+            return {'productId': product_id, 'status': 'active', 'pricingPolicy': 'legacy',
+                    'creditsGranted': migration['creditsGranted'], 'catalogVersion': 1,
+                    'alreadyProcessed': migration['alreadyProcessed'], 'creditSummary': migration['creditSummary'],
+                    'legacyMigration': migration}
     if platform not in {"ios", "android"}:
         raise HTTPException(status_code=422, detail="platform must be ios or android")
     if not verification_data or len(verification_data) > 2 * 1024 * 1024:

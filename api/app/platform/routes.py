@@ -271,7 +271,11 @@ def mobile_store_catalog(
             device_id=session["device_id"],
         )
     response.headers["Cache-Control"] = "private, no-store"
-    return {"accountToken": account_token, "products": catalog(normalized)}
+    from .legacy_verifier import rules
+    return {"accountToken": account_token, "products": catalog(normalized),
+            "legacyRestoreProductIds": sorted({'remove_ads_monthly'} | {
+                r.product_id for r in rules(settings) if r.platform == normalized}),
+            "legacyMigrationEnabled": settings.legacy_grant_enabled}
 
 
 async def _store_request(
@@ -305,6 +309,32 @@ async def mobile_store_restore(
     request: Request, authorization: str | None = Header(default=None)
 ) -> dict[str, Any]:
     return await _store_request(request, authorization, restored=True)
+
+
+@router.get('/api/mobile/v1/store/legacy-migration/v1')
+def mobile_legacy_migration_history(response: Response, authorization: str | None = Header(default=None)):
+    from .legacy_migration import history
+    session = _session(authorization)
+    response.headers['Cache-Control'] = 'private, no-store'
+    return {'version': 1, 'purchases': history(_settings(), session['user_id'])}
+
+
+@router.post('/api/store/legacy/v1/notifications/apple')
+async def legacy_apple_notification(request: Request):
+    from .legacy_notifications import apple_notification
+    from starlette.concurrency import run_in_threadpool
+    if len(await request.body()) > 2*1024*1024:
+        raise HTTPException(413, 'notification is too large')
+    return await run_in_threadpool(apple_notification, _settings(), _body(await request.json()))
+
+
+@router.post('/api/store/legacy/v1/notifications/google')
+async def legacy_google_notification(request: Request, authorization: str | None = Header(default=None)):
+    from .legacy_notifications import google_notification
+    from starlette.concurrency import run_in_threadpool
+    if len(await request.body()) > 2*1024*1024:
+        raise HTTPException(413, 'notification is too large')
+    return await run_in_threadpool(google_notification, _settings(), _body(await request.json()), authorization)
 
 
 @router.post('/api/v1/reports/preview')
