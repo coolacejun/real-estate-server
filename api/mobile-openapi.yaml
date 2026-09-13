@@ -128,7 +128,7 @@ paths:
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/mobile/v1/store/restore:
     post:
-      summary: Restore legacy ad removal and, when enabled and eligible, grant migration v1 credits once
+      summary: Verify current Google monthly subscription, synchronize expiry, and grant v1 once per account and lineage
       security: [{bearerAuth: []}]
       requestBody:
         required: true
@@ -138,6 +138,7 @@ paths:
       responses:
         '200': {$ref: '#/components/responses/StoreResult'}
         '422': {$ref: '#/components/responses/ValidationError'}
+        '410': {description: Apple and other legacy products are unsupported}
         '409': {description: Account binding review or ownership conflict}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/mobile/v1/store/legacy-migration/v1:
@@ -151,14 +152,12 @@ paths:
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/store/legacy/v1/notifications/apple:
     post:
-      summary: Verify production Apple signedPayload and reconcile REFUND or REVOKE once
+      summary: Apple legacy migration is unsupported
       responses:
-        '200': {description: Applied, already applied, or unrelated notification}
-        '422': {description: Signature, application, environment, or payload rejected}
-        '503': {description: Disabled or temporarily unavailable; retry delivery}
+        '410': {description: Always rejected; no historical Apple product}
   /api/store/legacy/v1/notifications/google:
     post:
-      summary: Verify PubSub OIDC audience and service account then reconcile one-time canceled or voided purchase
+      summary: Authenticate PubSub OIDC, synchronize subscriptionsv2, and reverse only the grant source order
       responses:
         '200': {description: Applied, already applied, or unrelated notification}
         '403': {description: Push authentication failed}
@@ -377,17 +376,21 @@ components:
             properties:
               transactionId: {type: string, format: uuid}
               productId: {type: string}
+              expiresAt: {type: string, format: date-time, nullable: true}
               creditsGranted: {type: integer}
               alreadyProcessed: {type: boolean}
               creditSummary: {$ref: '#/components/schemas/CreditSummary'}
               legacyMigration:
                 type: object
-                description: Present for enabled allowlisted migration restores; creditsGranted is new credits in this response
+                description: Google remove_ads_monthly only; creditsGranted is new credits in this response; expiry controls ad removal
                 properties:
                   version: {type: integer, enum: [1]}
-                  status: {type: string, enum: [granted, already_granted]}
+                  status: {type: string, enum: [granted, already_granted, grant_disabled, ineligible, revoked]}
                   creditsGranted: {type: integer, enum: [0, 10]}
                   alreadyProcessed: {type: boolean}
+                  entitlementActive: {type: boolean}
+                  expiresAt: {type: string, format: date-time, nullable: true}
+                  subscriptionState: {type: string}
     Pdf:
       description: Transient generated PDF with content and per-response byte hashes in headers
       headers:

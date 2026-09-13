@@ -1,81 +1,70 @@
-# Legacy ad-removal migration v1
+# Google monthly subscription migration v1
 
-## Approved benefit and evidence
+The confirmed historical product is Google Play `remove_ads_monthly`, a monthly auto-renewing subscription. Apple has no historical product. This contract supersedes the non-consumable/permanent-ad-removal proposal in the preceding preparation commit. It is not deployed and grants have not been applied to real accounts.
 
-On 2026-09-13 the owner clarified that the old KRW 4,900 purchase removed the rewarded-ad step before report creation. Preserve ad removal permanently in that legacy/ad-based flow. Add **10 paid server report credits per verified historical store purchase, once**, to the same central account. Current reports retain free-first/paid-next debits and current 10/30/50 packs after exhaustion. This is not an unlimited server-report entitlement.
+## Eligibility and benefit
 
-Source candidates are `remove_ads_monthly` (mobile `3c22f1f` and the existing server restore ID) and earlier `premium_monthly` (`6adbb1d`). Neither is enabled. The policy example has an empty allowlist. Trial copy and `buyNonConsumable` do not establish console type, price, sale interval or platform availability. Mobile removes legacy sale queries/buttons and unused trial dialogs, and loads restore IDs from the server catalog.
+Only a freshly verified, currently entitled paid Google subscriber can receive 10 central paid report credits, once per account AND once per provider-linked subscription lineage, migration version 1. The normal free-first/paid-next report debit and the current 10/30/50 consumables are unchanged. The current successful paid order must match the SKU, base plan and verified purchase token. Its amount must be positive; no hardcoded KRW 4,900 comparison is used. Test purchases, free trials, free promotions and unverifiable payments are excluded.
 
-**Only historical paid non-consumables are implemented.** Leave subscriptions, consumables, promotional/rewarded purchases and unidentified products disabled. Apple missing/zero signed price evidence, family-shared purchases, sandbox purchases and unavailable current provider records are ineligible. If console evidence differs, obtain a separate eligibility contract; do not relax checks to match an expected backfill count.
+| subscriptionsv2 state | Future provider expiry | Ads / first grant |
+| --- | --- | --- |
+| ACTIVE | Required | Eligible with successful paid order |
+| CANCELED (auto renewal canceled) | Required | Eligible through paid-through expiry |
+| IN_GRACE_PERIOD | Required | Eligible with the last successful paid order; Google retains entitlement in grace |
+| EXPIRED, PENDING, PAUSED, ON_HOLD, PENDING_PURCHASE_CANCELED, unknown | Any | Ineligible |
+| Replaced ancestor token, authenticated revoked token, voided latest order | Any | Ineligible |
 
-## API and ledger
+The matching provider catalog base plan must have `autoRenewingBasePlanType.billingPeriodDuration=P1M`; prepaid/installment plans are rejected. The order must be PROCESSED, a paid base/introductory (or paid proration) phase and positive actual payment. PENDING, CANCELED, PENDING_REFUND, REFUNDED and PARTIALLY_REFUNDED orders do not qualify. Orders' service-period timestamps are accounting snapshots; subscriptionsv2 expiry is the entitlement authority.
 
-- Existing `POST /api/mobile/v1/store/restore` retains legacy zero-credit behavior while migration is off. When enabled and allowlisted, fresh provider verification, sale-period checks and account binding are mandatory. The response adds `legacyMigration: {version: 1, status: granted|already_granted, creditsGranted: 10|0, alreadyProcessed: boolean}`; the count is new credits in this response. Client-provided amounts have no authority.
-- Authenticated `GET /api/mobile/v1/store/legacy-migration/v1` returns only that account's grant history and reconciliation counts. It requires schema 013. `/me` remains authoritative for current balance and ad removal across login, reinstall and device changes.
-- `legacy_store_purchases` uniquely identifies `(platform, identity_digest)`, with SQL constraints for version 1 and a ten-credit grant. Apple identity is the verified original transaction ID; Google identity is the verified purchase token. Type-prefixed hashes and uniquely constrained verified transaction/order aliases prevent replay. No new raw receipt/token is persisted.
-- A provider-scoped PostgreSQL advisory lock serializes grant, binding approval, aliases and refund tombstones. Ledger, source record, entitlement and audit commit atomically. Existing user row locks serialize with other credit mutations and report reservations. Ledger reason is `legacy_store_migration_v1`, reference type `legacy_store_purchase`; metadata records version, product, evidence reference and ten credits.
-- A supplied provider account token must equal the user's store account token, even with an operator approval. An absent historical token requires a reviewed `legacy_store_bindings` record. No mobile binding-approval API or automatic first-receipt-claim grant exists. A cached receipt digest or prior unbound entitlement alone is not ownership proof. Existing central transaction ownership is also checked; collisions cannot transfer a binding.
-- Apple uses current production Server API transaction info and the official signed-data library with trusted root, bundle/app ID, production environment and online certificate checks. A legacy app receipt only locates the transaction. Google uses Android Publisher state/type/quantity/non-consumption/account checks; a client order ID never selects identity. Android acknowledgement follows commit and is retryable, never consumption of the legacy product.
+Ad removal lasts only until the verified subscription expiry. `/me` filters expired entries and excludes all old undated and Apple legacy entitlements. The mobile app requires exact Android SKU and future expiry, clears on account change/logout, and expires its local state without another network response. RTDN updates cancellation, grace, hold, recovery and expiry. Missing notifications can leave a previously valid snapshot until its recorded expiry; working authenticated RTDN and delivery monitoring are rollout requirements.
 
-## Refund and cancellation
+## Restore and ownership
 
-- `POST /api/store/legacy/v1/notifications/apple` verifies the production notification and nested signed transaction, and handles REFUND/REVOKE with verified revocation evidence.
-- `POST /api/store/legacy/v1/notifications/google` authenticates Google OIDC audience, exact push service-account email and verified email, then checks the package. One-time canceled / voided events are actionable. A known token can be reconciled from authenticated void evidence even after provider 410. Unknown tokens require an allowlisted provider match; unresolved actionable events return 503 for delivery retry.
-- A refund before grant creates a permanent zero-credit tombstone. After grant, recover `min(10, paid_remaining)` under the user lock. Ledger reason is `legacy_store_reversal_v1`. Retain the used/unrecoverable portion in `reconciliation_credits`; never create a negative balance or debit again on notification replay. The shared paid bucket does not track individual credit units: recovery can use pre-existing paid credits, up to ten.
-- Ad-removal rows are never revoked by this migration. A revoked credit grant never automatically reactivates, including on refund-reversal events or configuration edits. Outstanding reconciliation is not automatically collected from future purchases or report-failure refunds; review it separately. Do not delete the original grant or invent another debit.
-- Notifications have a separate enable flag and must stay on when grants stop. Monitor retries/dead letters and reconcile reviewed manifests after outages. The batch `reconcile` mode verifies current provider state and makes no grants.
+Users log in and choose **내 정보 → 기존 구매 복원**. The installed Android billing plugin's `restorePurchases` calls `queryPurchases(ProductType.subs)` as well as inapp. Only the exact Google SKU is treated as subscription restoration; current consumable delivery continues through its existing verification path. No new subscription purchase CTA or sale query is introduced. A current pending purchase delivery for the known legacy SKU is also verified as a restore after it becomes purchased. Credits and active entitlement always come from the server; the app does not grant locally.
 
-## Preparation gates
+There is no raw legacy purchase-token inventory in the server. Login alone cannot automatically identify/backfill every old subscriber. Receipt hashes and old local ad flags do not establish paid eligibility or ownership. A user must supply the current Play subscription token through restore, or an operator must use an access-controlled reviewed input file. Do not claim complete automatic backfill.
 
-1. Obtain historical console evidence for each exact product ID: platform, non-consumable type, KRW 4,900 price/benefit and sale interval. If the SKU had different prices/benefits, leave it disabled pending a stricter contract. Record a durable non-secret evidence reference and an exclusive sale cutoff with UTC offset.
-2. Back up and test additive `db/013_legacy_store_migration.sql` after 009–012. Normal Compose deployment includes numbered SQL files; include that fact in the separately approved rollout. Schema creation grants nothing. Drain old server instances before enabling migration so every store writer runs the reviewed version.
-3. Populate a restricted policy file with evidenced values. This example is illustrative, not a discovered SKU or date:
+Provider `linkedPurchaseToken` is walked to the root (bounded to 32 with cycle rejection), or to a previously verified persisted ancestor. Missing ancestors without such an anchor fail closed for review. An out-of-app expired token is used only when its user mapping is already stored; it is never queried speculatively. Roots, token hashes and immutable grants prevent token replacement, renewal and linked-token replay from granting again or moving a purchase to another account. Branch conflicts require review instead of speculative merging.
 
-   ```json
-   {"version":1,"products":[{"platform":"android","productId":"confirmed.legacy.ad_removal","kind":"non_consumable","purchaseBefore":"2026-08-01T00:00:00Z","evidenceRef":"store-evidence/reviewed-case-id"}]}
-   ```
+Every present provider obfuscated account ID must match the central store-account UUID. A verified lineage's existing owner is inherited when linked descendants omit that field. Unbound historical tokens require a separate, reviewed ownership binding; the client cannot create one. A reviewer cannot override a conflicting provider account or historical central transaction owner. Record a non-secret support evidence reference. Never infer an owner from email, a local entitlement, or whoever submits a receipt first.
 
-   Mount using `LEGACY_POLICY_HOST_FILE`; direct CLI uses `LEGACY_POLICY_FILE`. Current/retired credit-pack IDs, duplicate entries, unsupported type and future/naive dates fail closed. Keep the default empty file until evidence is complete.
-4. Configure existing Apple root/bundle plus `APPLE_APP_ID`, `APPLE_IAP_KEY_ID`, `APPLE_IAP_ISSUER_ID` and read-only `APPLE_IAP_KEY_HOST_FILE` (CLI: `APPLE_IAP_KEY_FILE`). Configure the existing Google package/service-account secret. Install `api/requirements.txt`. Never commit real `.env`, keys, receipts, tokens or provider payloads.
-5. Configure Apple Notifications v2 and Google RTDN/PubSub authenticated push at the routes above. `GOOGLE_RTDN_AUDIENCE` is the exact expected audience; `GOOGLE_RTDN_EMAIL` identifies the approved **push** service account. Enable `LEGACY_NOTIFICATIONS_ENABLED=true` first. Validate delivery, signature/OIDC rejection, retries/dead letters and alerts in an approved store test environment. These real store tests were not run here.
-6. Independently establish each unbound purchaser's rightful central account using trusted support/store evidence. Email similarity, local subscription booleans or arbitrary receipt submission are insufficient. The `bind` mode records that separate operator review, not a blanket ownership bypass.
+## Storage, API and reconciliation
 
-## Backfill and retry
+Apply additive schema 014 after 009–013 in a separately authorized rollout. 013 tables remain superseded audit history; they are not reinterpreted. Any previously issued 013 grants block new v1 grants until explicitly reconciled. The new SQL has independent unique account, lineage and source-order grant constraints. A low-volume advisory lock covers provider reads and DB mutations; user row locks serialize balances with report/consumable activity. Ledger, grant, binding and snapshot writes commit atomically. Dry run executes this same path then rolls back ALL DB writes and does not acknowledge Play.
 
-Restricted JSONL input fields are `userId`, `platform`, `productId`, `verificationData` and optional `transactionId`. Binding rows also need `bindingEvidenceRef`. The existing database digest cannot reconstruct a receipt: obtain a fresh restore or a reviewed secure receipt export. Never commit the input or send it in chat.
+`POST /api/mobile/v1/store/restore` always uses the Google subscription verifier for legacy restoration. It returns `status=active|inactive`, nullable `expiresAt` and `legacyMigration` with `version`, `status=granted|already_granted|grant_disabled|ineligible|revoked`, newly granted `creditsGranted`, `alreadyProcessed`, `subscriptionState`, `entitlementActive` and `expiresAt`. Grant flags do not disable entitlement status sync. Apple/other legacy products fail closed with 410. The authenticated history endpoint returns only this account's grant state and reconciliation count. No raw token/order identity is returned.
 
-```sh
-# Default dry-run: provider/database reads and locks; no database writes,
-# acknowledgement, credit, entitlement or binding mutations.
-python scripts/legacy_store_migration.py --input /secure/batch.jsonl --report /secure/grant-dry-run.jsonl
-python scripts/legacy_store_migration.py --mode bind --input /secure/reviewed-bindings.jsonl --report /secure/bind-dry-run.jsonl
+The DB stores domain-separated token hashes, linked lineage, provider state, expiry, verification time, and the grant source order ID (not a bearer credential). It never stores raw subscription tokens or provider bodies. Logs/reports must not record input files, order IDs, account UUIDs, provider errors or credentials. Source order IDs allow refund reconciliation after an expired token becomes unavailable.
 
-# Separate explicit operator writes, only after the appropriate approval.
-python scripts/legacy_store_migration.py --mode bind --apply --input /secure/reviewed-bindings.jsonl --report /secure/bind-apply.jsonl
-# Repeat the grant dry-run after bindings exist and review all rejected rows.
-# Grants require BOTH enable flags; defaults remain false.
-python scripts/legacy_store_migration.py --apply --input /secure/batch.jsonl --report /secure/grant-apply.jsonl
+Normal expiration, renewal cancellation, hold or pause only ends ad access; it does not claw back the 10 credits. Refund/partial refund/chargeback or revocation of the **source payment used to justify that grant** reverses it once. A refund of an unrelated later renewal does not reverse the earlier grant. Reversal debits `min(10, paid_remaining)` and records any unrecovered amount as `reconciliation_credits`; balances never go negative. Do not erase grant identities or automatically repay a reversed v1 grant on another token.
 
-# Reconciliation also defaults to dry-run; use --apply only after review.
-python scripts/legacy_store_migration.py --mode reconcile --input /secure/batch.jsonl --report /secure/reconcile-dry-run.jsonl
+Google RTDN authenticates OIDC audience, verified exact push-service-account email and package name. Subscription notices re-fetch subscriptionsv2. A REVOKED notice permanently fences that token; reversal requires the source order to match the provider's current revoked order, or source Orders API refund evidence. Authenticated subscription void notices persist an order tombstone before any claim, even if the token later becomes unavailable. Tombstones commit before fallible provider queries. Refund/notification handling stays enabled when only the grant switch is off. Apple notification endpoint always returns 410. One-time consumable notices are outside this legacy handler.
+
+## Operator dry run / apply
+
+Do not run these against production as part of preparation. Use restricted JSONL files obtained through an approved support flow, and new redacted report paths. Tokens are sensitive; never put them in command lines or repository fixtures.
+
+A claim row uses `userId`, `platform=android`, `productId=remove_ads_monthly`, `verificationData=<current token>`. A binding review adds `bindingEvidenceRef`. A reconciliation row can use the same token fields, or only `sourceOrderId` for an already recorded grant order. The latter rechecks Orders API without needing an expired token and never creates a new grant.
+
+```
+python scripts/legacy_store_migration.py --input RESTRICTED.jsonl --report NEW-DRY.jsonl --mode grant
+python scripts/legacy_store_migration.py --input RESTRICTED.jsonl --report NEW-BIND-DRY.jsonl --mode bind
+python scripts/legacy_store_migration.py --input RESTRICTED.jsonl --report NEW-RECONCILE.jsonl --mode reconcile
 ```
 
-Reports are new files (never overwritten), flushed per row, containing line number, mode/status, counts and coarse error codes. No account UUID, token, receipt, order ID or provider exception text is output. Batches continue after failed rows and exit nonzero if any failed. Re-run the same input using a new report filename: successful grants/bindings/reversals stay idempotent. Review 409 ownership/binding conflicts; retry provider/acknowledgement 5xx failures. A crash after commit before report flush is safe: the next attempt returns already granted.
+Dry run is default; `--apply` explicitly commits. Binding and granting are separate operations. Review the redacted outputs before a separately approved apply. Reports are created exclusively, never overwritten; failures have coarse codes and safe retryability. Apply/retry is idempotent. Use reconciliation inputs exported securely from recorded source orders to audit missed refunds; this is not discovery/backfill of all subscribers.
 
-Dry-run is a point-in-time view, not a reservation; apply rechecks provider/account state. Start with a small reviewed batch, compare count × 10 with ledger/account deltas, then proceed in bounded batches. Archive redacted reports and evidence references. Protect input-file permissions and disable body/Authorization capture in proxies/APM. Dispose of temporary receipts under the operator's retention policy. No production dry-run/apply was executed here.
+## Rollout blockers and rollback
 
-## Rollback and enable blockers
+1. Production authority/permissions for subscriptionsv2, subscription catalog and Orders API, actual monthly base-plan evidence, and authenticated subscription + void RTDN delivery are not tested here. Set existing Google service account/package configuration and Google push audience/email through approved secret management. No Apple migration keys or policy allowlist are needed.
+2. Keep `LEGACY_GRANT_ENABLED=false` and `LEGACY_NOTIFICATIONS_ENABLED=false` in prepared defaults. Enable notification delivery and validate it before enabling grants. Do not enable grants with unreviewed owner mappings, uncertain linked lineage, unavailable Orders evidence or superseded 013 issued rows.
+3. Back up, apply 014 and drain old server/mobile writers in an approved coordinated release. Old server versions can expose undated/permanent entitlements and must not coexist with this contract. No old grant commit may be deployed independently.
+4. Monitor notification failures, Orders availability, binding review cases and reconciliation balances. Stop NEW grants with the grant flag; retain notifications, audit, immutable grants and reconciliation. Roll forward fixes; do not drop migration tables, reset identities, or revert to non-consumable/permanent-ad logic.
 
-Set `LEGACY_GRANT_ENABLED=false` to stop new grants while keeping policy entries, the notification handler and `LEGACY_NOTIFICATIONS_ENABLED=true` for issued credits. Do not remove allowlist entries during reconciliation. If an API image rollback removes notification handling, retain/retry provider delivery and reconcile the gap before enabling grants again.
+## Provider references
 
-Never drop 013 tables, delete bindings/grants/aliases/tombstones, rewrite balances or bump version to force a retry. Restoring an old DB snapshot can erase later purchases/report debits; data rollback or compensation needs separate reviewed reconciliation and backups. Mobile rollback does not erase server credits.
-
-Production enable requires exact console evidence, reviewed account bindings, real provider/notification verification, reviewed production dry-run, backups/rollout review and explicit operational authorization. Missing evidence means default disabled. No push, deployment, actual purchase/restore/acknowledgement, console change or production schema/data change was performed.
-
-## Primary references
-
-- [Apple official Server Library](https://github.com/apple/app-store-server-library-python): Server API and signed-data verification.
-- [Google ProductPurchase fields](https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.products): state/type, quantity, token and account binding.
-- [Google RTDN reference](https://developer.android.com/google/play/billing/rtdn-reference): canceled/voided notifications.
-
-Automated tests use synthetic fixtures and disposable loopback PostgreSQL; they do not substitute for the production gates. See the companion validation record for executed checks.
+- [Google subscriptionsv2 resource](https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2)
+- [Subscription lifecycle, grace and cancellation](https://developer.android.com/google/play/billing/lifecycle/subscriptions)
+- [Google order and paid phase evidence](https://developers.google.com/android-publisher/api-ref/rest/v3/orders)
+- [Monthly base-plan catalog](https://developers.google.com/android-publisher/api-ref/rest/v3/monetization.subscriptions)
+- [RTDN subscription and void events](https://developer.android.com/google/play/billing/rtdn-reference)

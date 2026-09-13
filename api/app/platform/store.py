@@ -34,7 +34,6 @@ PRODUCTS: dict[str, dict[str, Any]] = {
     "buildingland.report_credits_60": {"credits": 60, "enabled": False, "version": 1, "pricing": "retired"},
     "buildingland.report_credits_90": {"credits": 90, "enabled": False, "version": 1, "pricing": "retired"},
 }
-LEGACY_PRODUCT = "remove_ads_monthly"
 
 
 def catalog(platform: str) -> list[dict[str, Any]]:
@@ -86,6 +85,8 @@ class FakeStoreVerifier:
         transaction_id: str | None,
         account_token: str,
     ) -> VerifiedPurchase:
+        if product_id not in PRODUCTS:
+            raise HTTPException(410, 'legacy products require the subscription restoration verifier')
         try:
             payload = json.loads(verification_data)
         except ValueError as exc:
@@ -217,6 +218,8 @@ class AppleStoreVerifier:
         transaction_id: str | None,
         account_token: str,
     ) -> VerifiedPurchase:
+        if product_id not in PRODUCTS:
+            raise HTTPException(410, 'legacy products require the subscription restoration verifier')
         signed_value = verification_data
         try:
             wrapper = json.loads(verification_data)
@@ -252,7 +255,7 @@ class AppleStoreVerifier:
         received_account = str(item.get("appAccountToken") or item.get("app_account_token") or "")
         if received_account and not constant_time_equal(received_account.lower(), account_token.lower()):
             raise HTTPException(status_code=422, detail="Apple receipt account mismatch")
-        if not received_account and product_id != LEGACY_PRODUCT:
+        if not received_account:
             raise HTTPException(status_code=422, detail="Apple receipt account binding is missing")
         key = str(item.get("transactionId") or item.get("transaction_id") or transaction_id or "")
         if not key:
@@ -301,6 +304,8 @@ class GooglePlayVerifier:
         transaction_id: str | None,
         account_token: str,
     ) -> VerifiedPurchase:
+        if product_id not in PRODUCTS:
+            raise HTTPException(410, 'legacy products require the subscription restoration verifier')
         token = verification_data.strip()
         if not token:
             raise HTTPException(status_code=422, detail="Google Play purchase token is missing")
@@ -320,13 +325,15 @@ class GooglePlayVerifier:
         )
         if received_account and not constant_time_equal(received_account.lower(), account_token.lower()):
             raise HTTPException(status_code=422, detail="Google Play purchase account mismatch")
-        if not received_account and product_id != LEGACY_PRODUCT:
+        if not received_account:
             raise HTTPException(status_code=422, detail="Google Play purchase account binding is missing")
         key = str(payload.get("orderId") or transaction_id or sha256_text(token))
         return VerifiedPurchase("android", key, product_id, received_account, "production", True)
 
     def post_commit(self, *, product_id: str, verification_data: str) -> None:
-        action = "acknowledge" if product_id == LEGACY_PRODUCT else "consume"
+        if product_id not in PRODUCTS:
+            raise HTTPException(410, 'legacy products require the subscription restoration verifier')
+        action = "consume"
         try:
             response = self._session().post(
                 f"{self._url(product_id, verification_data.strip())}:{action}",
@@ -359,24 +366,19 @@ def process_purchase(
     transaction_id: str | None,
     restored: bool,
 ) -> dict[str, Any]:
-    if restored and settings.legacy_grant_enabled:
-        from .legacy_verifier import rules
-        if any(r.platform == platform and r.product_id == product_id for r in rules(settings)):
-            from .legacy_migration import process_legacy
-            migration = process_legacy(settings, user_id=user_id, platform=platform,
-                product_id=product_id, verification_data=verification_data, transaction_id=transaction_id)
-            if migration['status'] == 'revoked':
-                raise HTTPException(422, 'legacy purchase was revoked')
-            return {'productId': product_id, 'status': 'active', 'pricingPolicy': 'legacy',
-                    'creditsGranted': migration['creditsGranted'], 'catalogVersion': 1,
-                    'alreadyProcessed': migration['alreadyProcessed'], 'creditSummary': migration['creditSummary'],
-                    'legacyMigration': migration}
+    if restored:
+        from .legacy_migration import process_legacy
+        migration = process_legacy(settings, user_id=user_id, platform=platform,
+            product_id=product_id, verification_data=verification_data, transaction_id=transaction_id)
+        return {'productId': product_id, 'status': 'active' if migration['entitlementActive'] else 'inactive',
+                'expiresAt': migration['expiresAt'], 'pricingPolicy': 'legacy',
+                'creditsGranted': migration['creditsGranted'], 'catalogVersion': 1,
+                'alreadyProcessed': migration['alreadyProcessed'], 'creditSummary': migration['creditSummary'],
+                'legacyMigration': migration}
     if platform not in {"ios", "android"}:
         raise HTTPException(status_code=422, detail="platform must be ios or android")
     if not verification_data or len(verification_data) > 2 * 1024 * 1024:
         raise HTTPException(status_code=422, detail="verificationData is missing or too large")
-    if restored and product_id != LEGACY_PRODUCT:
-        raise HTTPException(status_code=422, detail="consumable credit products cannot be restored")
     if not restored and product_id not in PRODUCTS:
         raise HTTPException(status_code=422, detail="unknown store product")
     if not restored and not bool(PRODUCTS[product_id]["enabled"]):
@@ -411,8 +413,8 @@ def process_purchase(
         if verified.platform != platform or verified.product_id != product_id:
             raise HTTPException(status_code=422, detail="verified store transaction does not match request")
         config = PRODUCTS.get(product_id)
-        credits = 0 if restored else int(config["credits"] if config else 0)
-        pricing_policy = "legacy" if restored else str(config["pricing"])
+        credits = int(config["credits"])
+        pricing_policy = str(config["pricing"])
         store_transaction_id = new_id()
         with connect(settings) as connection:
             assert_schema(connection)
@@ -457,17 +459,6 @@ def process_purchase(
                         reference_type="store_transaction",
                         reference_id=store_transaction_id,
                         metadata={"platform": platform, "productId": product_id, "catalogVersion": int(config["version"])},
-                    )
-                if restored:
-                    connection.execute(
-                        """
-                        INSERT INTO platform_entitlements
-                          (id, user_id, store, product_id, status, pricing_policy, source_transaction_id)
-                        VALUES (%s, %s, %s, %s, 'active', 'legacy', %s)
-                        ON CONFLICT (user_id, store, product_id) DO UPDATE
-                        SET status = 'active', source_transaction_id = EXCLUDED.source_transaction_id, updated_at = NOW()
-                        """,
-                        (new_id(), user_id, platform, product_id, store_transaction_id),
                     )
                 connection.execute(
                     """

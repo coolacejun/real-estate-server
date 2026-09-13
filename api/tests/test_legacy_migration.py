@@ -1,333 +1,439 @@
 from __future__ import annotations
 import base64
-import io
+import copy
 import json
 import os
-import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
-
+from datetime import timedelta
+from unittest.mock import patch, Mock
+from urllib.parse import unquote
 import psycopg
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 import test_mobile_platform as base
-from app.platform.config import get_settings
-from app.platform.legacy_migration import process_legacy, approve_binding, reconcile
-from app.platform.legacy_verifier import verify_legacy, rules, google_purchase, apple_purchase, apple_verifier
-from app.platform.legacy_notifications import google_notification, apple_notification, verify_google_push
-from app.platform.repository import connect
 from app.main import app
+from app.platform.config import get_settings
+from app.platform.legacy_verifier import PRODUCT, now, token_digest, verify_legacy, _session
+from app.platform.legacy_migration import process_legacy, approve_binding, reconcile
+from app.platform.legacy_notifications import google_notification, apple_notification, verify_google_push
 
-
-class LegacyMigrationTest(unittest.TestCase):
+class LegacySubscriptionTest(unittest.TestCase):
     _create_user = base.MobilePlatformContractTest._create_user
     _credit_summary = base.MobilePlatformContractTest._credit_summary
 
     @classmethod
     def setUpClass(cls):
         cls.database_url = os.environ['DATABASE_URL']
-        cls.temp = tempfile.TemporaryDirectory()
-        cls.policy = Path(cls.temp.name) / 'policy.json'
-        cls.policy.write_text(json.dumps({'version': 1, 'products': [
-            {'platform': p, 'productId': 'remove_ads_monthly', 'kind': 'non_consumable',
-             'purchaseBefore': '2026-08-01T00:00:00Z', 'evidenceRef': 'synthetic-test-evidence'}
-            for p in ('ios', 'android')]}), encoding='utf-8')
-        cls.settings = replace(get_settings(), legacy_policy_file=str(cls.policy),
-            legacy_grant_enabled=True, legacy_notifications_enabled=True,
-            google_play_package_name='test.package', google_rtdn_audience='https://test/push',
-            google_rtdn_email='push@example.test')
         cls.client = TestClient(app)
+        cls.settings = replace(get_settings(), legacy_grant_enabled=True, legacy_notifications_enabled=True,
+            google_play_package_name='test.package', google_rtdn_audience='https://test/push', google_rtdn_email='push@example.test')
 
     @classmethod
     def tearDownClass(cls):
         cls.client.close()
-        cls.temp.cleanup()
 
     def setUp(self):
         with psycopg.connect(self.database_url) as c:
-            c.execute('TRUNCATE platform_users,mobile_oauth_flows CASCADE')
+            c.execute('TRUNCATE platform_users,mobile_oauth_flows,legacy_subscription_lineages,legacy_subscription_order_voids,legacy_subscription_token_revocations CASCADE')
         self.user, _, self.headers = self._create_user(paid=7)
-        self.token = self.client.get('/api/mobile/v1/store/catalog?platform=android', headers=self.headers).json()['accountToken']
-        self.ios_token = self.client.get('/api/mobile/v1/store/catalog?platform=ios', headers=self.headers).json()['accountToken']
+        self.account = self.client.get('/api/mobile/v1/store/catalog?platform=android', headers=self.headers).json()['accountToken']
+        self.subs, self.orders = {}, {}
+        self.catalog = {'productId': PRODUCT, 'basePlans': [{'basePlanId': 'monthly', 'autoRenewingBasePlanType': {'billingPeriodDuration': 'P1M'}}]}
+        self.add('token-a', 'order-a')
+        self.transport = patch('app.platform.legacy_verifier._get_json', side_effect=self.provider)
+        self.transport.start()
+        self.addCleanup(self.transport.stop)
 
-    def evidence(self, platform='android', **changes):
-        p = dict(valid=True, platform=platform, productId='remove_ads_monthly', transactionId='order-one',
-                 originalTransactionId='original-one', purchaseToken='sensitive-purchase-token',
-                 purchasedMs=1700000000000, accountToken=self.token if platform == 'android' else self.ios_token,
-                 state='purchased')
-        p.update(changes)
-        return dict(platform=platform, product_id=p['productId'], verification_data=json.dumps(p))
+    def add(self, token, order, linked=None, state='ACTIVE', days=30, account=None):
+        self.subs[token] = {'kind': 'androidpublisher#subscriptionPurchaseV2',
+            'subscriptionState': 'SUBSCRIPTION_STATE_' + state,
+            'acknowledgementState': 'ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED',
+            'externalAccountIdentifiers': {'obfuscatedExternalAccountId': self.account if account is None else account},
+            'lineItems': [{'productId': PRODUCT, 'autoRenewingPlan': {'autoRenewEnabled': state != 'CANCELED'},
+                'offerDetails': {'basePlanId': 'monthly'}, 'latestSuccessfulOrderId': order,
+                'expiryTime': (now() + timedelta(days=days)).isoformat()}]}
+        if linked:
+            self.subs[token]['linkedPurchaseToken'] = linked
+        self.orders[order] = {'orderId': order, 'purchaseToken': token, 'state': 'PROCESSED', 'lineItems': [
+            {'productId': PRODUCT, 'total': {'units': '4900', 'currencyCode': 'KRW'},
+             'subscriptionDetails': {'basePlanId': 'monthly', 'offerPhaseDetails': {'baseDetails': {}}}}]}
 
-    def grant(self, *, apply=True, user=None, settings=None, **changes):
-        return process_legacy(settings or self.settings, user_id=user or self.user, apply=apply, **self.evidence(**changes))
+    def provider(self, settings, resource):
+        if resource.startswith('purchases/subscriptionsv2/tokens/'):
+            row = self.subs.get(unquote(resource.split('/')[-1]))
+        elif resource.startswith('orders/'):
+            row = self.orders.get(unquote(resource[7:]))
+        elif resource == 'subscriptions/' + PRODUCT:
+            row = self.catalog
+        else:
+            raise AssertionError('unexpected provider API')
+        if row is None:
+            raise HTTPException(422, 'synthetic unavailable')
+        return copy.deepcopy(row)
 
-    def scalar(self, sql):
+    def verification(self, token='token-a'):
+        return dict(platform='android', product_id=PRODUCT, verification_data=token)
+
+    def grant(self, token='token-a', **kwargs):
+        return process_legacy(kwargs.pop('settings', self.settings), user_id=kwargs.pop('user_id', self.user),
+            **self.verification(token), **kwargs)
+
+    def scalar(self, sql, params=()):
         with psycopg.connect(self.database_url) as c:
-            return c.execute(sql).fetchone()[0]
+            return c.execute(sql, params).fetchone()[0]
 
-    def test_disabled_default_and_empty_allowlist(self):
-        self.assertFalse(replace(get_settings(), legacy_policy_file='').legacy_grant_enabled)
-        self.assertEqual(rules(replace(self.settings, legacy_policy_file='')), [])
-        for change in ({'legacy_grant_enabled': False}, {'legacy_notifications_enabled': False}, {'legacy_policy_file': ''}):
-            with self.assertRaises(HTTPException):
-                self.grant(settings=replace(self.settings, **change))
-        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_store_purchases'), 0)
+    def profile(self):
+        return self.client.get('/api/mobile/v1/me', headers=self.headers).json()
 
-    def test_concurrent_android_replay_one_grant_and_existing_balance_added(self):
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            result = list(pool.map(lambda _: self.grant(), range(16)))
-        self.assertEqual(sum(r['creditsGranted'] for r in result), 10)
-        self.assertEqual(self._credit_summary(self.headers)['paidRemaining'], 17)
-        self.assertEqual(self.scalar("SELECT count(*) FROM platform_credit_ledger WHERE reason='legacy_store_migration_v1'"), 1)
-        self.assertEqual(self.scalar('SELECT credits_granted FROM legacy_store_purchases'), 10)
+    def push(self, body, settings=None):
+        payload = {'message': {'data': base64.b64encode(json.dumps({'packageName': 'test.package', **body}).encode()).decode()}}
+        with patch('app.platform.legacy_notifications.verify_google_push'):
+            return google_notification(settings or self.settings, payload, 'Bearer synthetic')
 
-    def test_apple_original_transaction_replay_new_receipt_no_extra_grant(self):
-        self.grant(platform='ios')
-        result = self.grant(platform='ios', transactionId='restored-transaction')
-        self.assertEqual(result['status'], 'already_granted')
-        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_store_aliases'), 3)
-        self.assertEqual(self._credit_summary(self.headers)['paidRemaining'], 17)
+    def notice(self, kind, token='token-a'):
+        return self.push({'subscriptionNotification': {'subscriptionId': PRODUCT, 'purchaseToken': token, 'notificationType': kind}})
 
-    def test_dry_run_is_read_only_and_apply_retry_safe(self):
-        first = self.grant(apply=False)
-        self.assertEqual(first['status'], 'would_grant')
-        for table in ('legacy_store_purchases', 'legacy_store_aliases', 'legacy_store_audit', 'platform_credit_ledger', 'platform_entitlements'):
-            self.assertEqual(self.scalar('SELECT count(*) FROM ' + table), 0)
+    def void(self, order='order-a', token='token-a'):
+        return self.push({'voidedPurchaseNotification': {'productType': 1, 'purchaseToken': token, 'orderId': order}})
+
+    def test_concurrent_replay_once_per_account(self):
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(lambda _: self.grant(), range(12)))
+        self.assertEqual(sum(r['creditsGranted'] for r in results), 10)
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 17)
+        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_subscription_grants'), 1)
+
+    def test_valid_states_and_expiry(self):
+        for state in ('ACTIVE', 'CANCELED', 'IN_GRACE_PERIOD'):
+            with self.subTest(state=state):
+                self.subs['token-a']['subscriptionState'] = 'SUBSCRIPTION_STATE_' + state
+                result = self.grant(apply=False)
+                self.assertEqual(result['status'], 'would_grant')
+                self.assertTrue(result['entitlementActive'])
+        for state in ('EXPIRED', 'PENDING', 'PAUSED', 'ON_HOLD', 'PENDING_PURCHASE_CANCELED', 'UNSPECIFIED'):
+            with self.subTest(state=state):
+                self.subs['token-a']['subscriptionState'] = 'SUBSCRIPTION_STATE_' + state
+                result = self.grant(apply=False)
+                self.assertEqual(result['creditsGranted'], 0)
+                self.assertFalse(result['entitlementActive'])
+        self.add('token-a', 'order-a', days=-1)
+        self.assertEqual(self.grant()['creditsGranted'], 0)
+
+    def test_normal_expiry_does_not_reverse_credits(self):
         self.grant()
-        self.assertEqual(self.grant(apply=False)['status'], 'already_granted')
+        self.add('token-a', 'order-a', state='EXPIRED', days=-1)
+        self.notice(13)
+        self.assertEqual(self.profile()['storeEntitlements'], [])
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 17)
+        self.assertEqual(self.scalar("SELECT state FROM legacy_subscription_grants"), 'granted')
 
-    def test_rejects_pending_invalid_mismatched_and_nonhistorical(self):
-        for changes in ({'state': 'pending'}, {'state': 'unverifiable'}, {'state': 'canceled'},
-                        {'state': 'chargeback'}, {'valid': False}, {'accountToken': 'other'},
-                        {'productId': 'buildingland.report_credits_10'}, {'purchasedMs': 1900000000000}):
-            with self.subTest(changes=changes), self.assertRaises(HTTPException):
-                self.grant(**changes)
-        self.assertEqual(self._credit_summary(self.headers)['paidRemaining'], 7)
+    def test_profile_expires_without_another_provider_event(self):
+        self.grant()
+        with psycopg.connect(self.database_url) as c:
+            c.execute("UPDATE platform_entitlements SET expires_at=NOW()-INTERVAL '1 second'")
+        self.assertEqual(self.profile()['storeEntitlements'], [])
 
-    def test_unbound_requires_review_and_cannot_transfer(self):
-        proof = self.evidence(accountToken='')
+    def test_hold_then_recovery_resyncs_without_new_grant(self):
+        self.grant()
+        self.subs['token-a']['subscriptionState'] = 'SUBSCRIPTION_STATE_ON_HOLD'
+        self.notice(5)
+        self.assertEqual(self.profile()['storeEntitlements'], [])
+        self.subs['token-a']['subscriptionState'] = 'SUBSCRIPTION_STATE_ACTIVE'
+        self.notice(1)
+        self.assertEqual(len(self.profile()['storeEntitlements']), 1)
+        self.assertEqual(self.grant()['creditsGranted'], 0)
+
+    def test_monthly_plan_and_paid_provider_evidence_required(self):
+        self.catalog['basePlans'][0]['autoRenewingBasePlanType']['billingPeriodDuration'] = 'P1Y'
         with self.assertRaises(HTTPException):
-            process_legacy(self.settings, user_id=self.user, **proof)
-        approve_binding(self.settings, user_id=self.user, evidence_ref='support/case-1', **proof)
-        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_store_bindings'), 0)
-        approve_binding(self.settings, user_id=self.user, evidence_ref='support/case-1', apply=True, **proof)
-        process_legacy(self.settings, user_id=self.user, **proof)
+            self.grant()
+        self.catalog['basePlans'][0]['autoRenewingBasePlanType']['billingPeriodDuration'] = 'P1M'
+        line = self.orders['order-a']['lineItems'][0]
+        line['total']['units'] = '0'
+        self.assertEqual(self.grant(apply=False)['creditsGranted'], 0)
+        line['total']['units'] = '1000'  # Actual paid amount need not equal 4900.
+        self.assertEqual(self.grant(apply=False)['creditsGranted'], 10)
+        line['subscriptionDetails']['offerPhaseDetails'] = {'freeTrialDetails': {}}
+        self.assertEqual(self.grant(apply=False)['creditsGranted'], 0)
+
+    def test_invalid_payment_states_excluded(self):
+        for state in ('PENDING', 'CANCELED', 'PENDING_REFUND', 'REFUNDED', 'PARTIALLY_REFUNDED'):
+            self.orders['order-a']['state'] = state
+            self.assertEqual(self.grant(apply=False)['creditsGranted'], 0)
+
+    def test_wrong_product_prepaid_installment_test_purchase_fail_closed(self):
+        original = copy.deepcopy(self.subs['token-a'])
+        for mutation in ('product', 'prepaid', 'installment', 'test'):
+            self.subs['token-a'] = copy.deepcopy(original)
+            p = self.subs['token-a']
+            if mutation == 'product': p['lineItems'][0]['productId'] = 'different'
+            if mutation == 'prepaid': p['lineItems'][0]['prepaidPlan'] = {}
+            if mutation == 'installment': p['lineItems'][0]['autoRenewingPlan']['installmentDetails'] = {}
+            if mutation == 'test': p['testPurchase'] = {}
+            with self.subTest(mutation=mutation), self.assertRaises(HTTPException): self.grant()
+
+    def test_apple_and_other_legacy_ids_fail_closed(self):
+        for platform, product in (('ios', PRODUCT), ('android', 'retired.other')):
+            with self.assertRaises(HTTPException) as failure:
+                process_legacy(self.settings, user_id=self.user, platform=platform, product_id=product, verification_data='x')
+            self.assertEqual(failure.exception.status_code, 410)
+        with self.assertRaises(HTTPException): apple_notification(self.settings, {})
+        self.assertEqual(self.client.get('/api/mobile/v1/store/catalog?platform=ios', headers=self.headers).json()['legacyRestoreProductIds'], [])
+
+    def test_missing_identity_requires_review_and_cannot_transfer(self):
+        self.subs['token-a']['externalAccountIdentifiers'] = {}
+        with self.assertRaises(HTTPException): self.grant()
+        approve_binding(self.settings, user_id=self.user, evidence_ref='support/case1', **self.verification())
+        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_subscription_lineages'), 0)
+        approve_binding(self.settings, user_id=self.user, evidence_ref='support/case1', apply=True, **self.verification())
+        self.grant()
         other, _, _ = self._create_user()
-        with self.assertRaises(HTTPException):
-            approve_binding(self.settings, user_id=other, evidence_ref='case-2', apply=True, **proof)
-        with self.assertRaises(HTTPException):
-            process_legacy(self.settings, user_id=other, **proof)
+        with self.assertRaises(HTTPException): self.grant(user_id=other)
 
-    def test_existing_store_owner_conflict_is_not_auto_migrated(self):
-        proof = self.evidence()
+    def test_provider_account_mismatch_cannot_be_manually_overridden(self):
+        self.subs['token-a']['externalAccountIdentifiers']['obfuscatedExternalAccountId'] = 'other'
+        with self.assertRaises(HTTPException): self.grant()
+        with self.assertRaises(HTTPException):
+            approve_binding(self.settings, user_id=self.user, evidence_ref='support/case1', apply=True, **self.verification())
+
+    def test_renewal_linked_tokens_and_separate_lineage_never_double_grant(self):
+        self.grant()
+        self.add('token-a', 'order-renewal')
+        self.assertEqual(self.grant()['creditsGranted'], 0)
+        self.add('token-b', 'order-b', linked='token-a')
+        self.assertEqual(self.grant('token-b')['creditsGranted'], 0)
+        self.add('token-c', 'order-c')
+        self.assertEqual(self.grant('token-c')['creditsGranted'], 0)
+        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_subscription_lineages'), 2)
         other, _, _ = self._create_user()
-        from app.platform.security import sha256_text
-        from app.platform.repository import new_id
-        with psycopg.connect(self.database_url) as c:
-            c.execute('''INSERT INTO mobile_store_transactions
-                (id,platform,transaction_key,verification_digest,user_id,product_id,store_environment,status,pricing_policy)
-                VALUES (%s,'android','order-one',%s,%s,'remove_ads_monthly','production','entitled','legacy')''',
-                (new_id(), sha256_text(proof['verification_data']), other))
-        with self.assertRaises(HTTPException):
-            process_legacy(self.settings, user_id=self.user, **proof)
-        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_store_purchases'), 0)
+        with self.assertRaises(HTTPException): self.grant('token-b', user_id=other)
 
-    def test_ack_failure_is_after_commit_and_retry_does_not_grant_twice(self):
-        with patch('app.platform.legacy_verifier.acknowledge_legacy', side_effect=HTTPException(503, 'retry')):
-            with self.assertRaises(HTTPException):
-                self.grant()
-        self.assertEqual(self._credit_summary(self.headers)['paidRemaining'], 17)
-        self.assertEqual(self.grant()['status'], 'already_granted')
-        self.assertEqual(self._credit_summary(self.headers)['paidRemaining'], 17)
+    def test_unknown_link_chain_resolves_root_and_conflicting_owner_rejected(self):
+        self.add('token-b', 'order-b', linked='token-a')
+        self.grant('token-b')
+        self.assertEqual(self.scalar('SELECT root_digest FROM legacy_subscription_lineages'), token_digest('token-a'))
+        self.assertEqual(self.grant()['creditsGranted'], 0)
+        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_subscription_grants'), 1)
 
-    def test_refund_dry_run_and_zero_balance_reconciliation(self):
-        revoked = verify_legacy(self.settings, **self.evidence(state='revoked'))
-        self.assertEqual(reconcile(self.settings, purchase=revoked)['status'], 'would_revoke')
-        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_store_purchases'), 0)
+    def test_missing_ancestor_or_cycle_fails_closed(self):
+        self.subs['token-a']['linkedPurchaseToken'] = 'missing'
+        with self.assertRaises(HTTPException): self.grant()
+        self.subs['token-a']['linkedPurchaseToken'] = 'token-a'
+        with self.assertRaises(HTTPException): self.grant()
+        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_subscription_grants'), 0)
+
+    def test_persisted_ancestor_can_anchor_after_provider_token_expiry(self):
         self.grant()
-        with psycopg.connect(self.database_url) as c:
-            c.execute('UPDATE platform_users SET paid_remaining=0 WHERE id=%s', (self.user,))
-        reconcile(self.settings, purchase=revoked)
-        self.assertEqual(self.scalar('SELECT state FROM legacy_store_purchases'), 'granted')
-        result = reconcile(self.settings, purchase=revoked, apply=True)
-        self.assertEqual(result['debited'], 0)
-        self.assertEqual(result['reconciliationCredits'], 10)
-        self.assertEqual(self.scalar("SELECT count(*) FROM platform_credit_ledger WHERE delta<0"), 0)
+        self.add('token-b', 'order-b', linked='token-a')
+        del self.subs['token-a']
+        self.assertEqual(self.grant('token-b')['creditsGranted'], 0)
 
-    def test_apple_signed_refund_handler_preserves_entitlement_and_rejects_bad_envelope(self):
-        self.grant(platform='ios')
-        item = SimpleNamespace(transactionId='restored-id', originalTransactionId='original-one',
-            productId='remove_ads_monthly', type='Non-Consumable', inAppOwnershipType='PURCHASED',
-            revocationDate=1700000000100, originalPurchaseDate=1700000000000,
-            purchaseDate=1700000000000, appAccountToken=self.ios_token)
-        verifier = Mock()
-        verifier.verify_and_decode_notification.return_value = SimpleNamespace(notificationType='REFUND',
-            data=SimpleNamespace(signedTransactionInfo='nested'))
-        verifier.verify_and_decode_signed_transaction.return_value = item
-        with patch('app.platform.legacy_notifications.apple_verifier', return_value=verifier):
-            self.assertEqual(apple_notification(self.settings, {'signedPayload': 'synthetic'})['status'], 'revoked')
-            self.assertEqual(apple_notification(self.settings, {'signedPayload': 'synthetic'})['status'], 'already_revoked')
-            verifier.verify_and_decode_notification.side_effect = ValueError('invalid signature')
-            with self.assertRaises(HTTPException):
-                apple_notification(self.settings, {'signedPayload': 'tampered'})
-        self.assertEqual(self.scalar("SELECT count(*) FROM platform_entitlements WHERE status='active'"), 1)
-
-    def test_schema_rerun_does_not_remove_grant_or_enable_second_grant(self):
+    def test_old_replaced_token_cannot_reactivate_or_clear_current_entitlement(self):
         self.grant()
-        migration = Path(__file__).resolve().parents[2] / 'db/013_legacy_store_migration.sql'
-        with psycopg.connect(self.database_url, autocommit=True) as c:
-            c.execute(migration.read_text(encoding='utf-8'))
-            c.execute(migration.read_text(encoding='utf-8'))
-        self.assertEqual(self.grant()['status'], 'already_granted')
-        self.assertEqual(self._credit_summary(self.headers)['paidRemaining'], 17)
-
-    def test_transaction_rolls_back_ledger_on_failure(self):
-        with patch('app.platform.legacy_migration._audit', side_effect=RuntimeError('synthetic failure')):
-            with self.assertRaises(RuntimeError):
-                self.grant()
-        self.assertEqual(self._credit_summary(self.headers)['paidRemaining'], 7)
-        self.assertEqual(self.scalar('SELECT count(*) FROM platform_credit_ledger'), 0)
+        self.add('token-b', 'order-b', linked='token-a')
+        self.grant('token-b')
+        expiry = self.profile()['storeEntitlements'][0]['expiresAt']
+        self.add('token-a', 'order-a', state='EXPIRED', days=-1)
+        self.notice(13)
+        self.assertEqual(self.profile()['storeEntitlements'][0]['expiresAt'], expiry)
+        self.subs['token-b']['subscriptionState'] = 'SUBSCRIPTION_STATE_ON_HOLD'
+        self.notice(5, 'token-b')
+        self.add('token-a', 'order-a')
         self.grant()
-        self.assertEqual(self._credit_summary(self.headers)['paidRemaining'], 17)
+        self.assertEqual(self.profile()['storeEntitlements'], [])
 
-    def test_refund_once_no_negative_balance_and_preserves_ad_removal(self):
+    def test_source_refund_reversal_nonnegative_and_idempotent(self):
         self.grant()
         with psycopg.connect(self.database_url) as c:
             c.execute('UPDATE platform_users SET paid_remaining=3 WHERE id=%s', (self.user,))
-        revoked = verify_legacy(self.settings, **self.evidence(state='revoked'))
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            results = list(pool.map(lambda _: reconcile(self.settings, purchase=revoked, apply=True), range(12)))
-        self.assertEqual(sum(r.get('debited', 0) for r in results), 3)
-        self.assertEqual(self._credit_summary(self.headers)['paidRemaining'], 0)
-        self.assertEqual(self.scalar('SELECT reconciliation_credits FROM legacy_store_purchases'), 7)
-        self.assertEqual(self.scalar("SELECT count(*) FROM platform_entitlements WHERE status='active'"), 1)
-        self.assertEqual(self.grant()['status'], 'revoked')
+        result = self.void()
+        self.assertEqual((result['debited'], result['reconciliationCredits']), (3, 7))
+        self.assertEqual(self.void()['status'], 'already_revoked')
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 0)
+        self.assertEqual(self.profile()['storeEntitlements'], [])
+        self.assertEqual(self.grant()['creditsGranted'], 0)
 
-    def test_refund_before_grant_wins_and_kill_switch_keeps_reconciliation(self):
-        proof = verify_legacy(self.settings, **self.evidence(state='revoked'))
-        disabled = replace(self.settings, legacy_grant_enabled=False)
-        reconcile(disabled, purchase=proof, apply=True)
-        self.assertEqual(self.grant()['status'], 'revoked')
-        self.assertEqual(self._credit_summary(self.headers)['paidRemaining'], 7)
-
-    def test_concurrent_grant_refund_no_resurrection(self):
-        revoked = verify_legacy(self.settings, **self.evidence(state='revoked'))
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            a = pool.submit(self.grant)
-            b = pool.submit(reconcile, self.settings, purchase=revoked, apply=True)
-            a.result(); b.result()
-        self.assertEqual(self.scalar('SELECT state FROM legacy_store_purchases'), 'revoked')
-        self.assertEqual(self._credit_summary(self.headers)['paidRemaining'], 7)
-
-    def test_restore_and_history_are_authorized_and_server_amount_fixed(self):
-        evidence = self.evidence()
-        request = {'platform': 'android', 'productId': 'remove_ads_monthly', 'restored': True,
-                   'verificationData': evidence['verification_data'], 'credits': 99999}
-        with patch('app.platform.routes._settings', return_value=self.settings):
-            self.assertEqual(self.client.post('/api/mobile/v1/store/restore', json=request).status_code, 401)
-            first = self.client.post('/api/mobile/v1/store/restore', headers=self.headers, json=request)
-            self.assertEqual(first.status_code, 200, first.text)
-            self.assertEqual(first.json()['legacyMigration']['creditsGranted'], 10)
-            again = self.client.post('/api/mobile/v1/store/restore', headers=self.headers, json=request)
-            self.assertEqual(again.json()['legacyMigration']['status'], 'already_granted')
-            history = self.client.get('/api/mobile/v1/store/legacy-migration/v1', headers=self.headers).json()
-            self.assertEqual(history['purchases'][0]['creditsGranted'], 10)
-            other, _, headers = self._create_user()
-            self.assertEqual(self.client.get('/api/mobile/v1/store/legacy-migration/v1', headers=headers).json()['purchases'], [])
-
-    def test_google_authenticated_void_notification_handles_provider_410(self):
+    def test_other_renewal_refund_never_reverses_source_grant(self):
         self.grant()
-        data = {'packageName': 'test.package', 'voidedPurchaseNotification': {'productType': 2, 'purchaseToken': 'sensitive-purchase-token'}}
-        payload = {'message': {'data': base64.b64encode(json.dumps(data).encode()).decode()}}
-        with self.assertRaises(HTTPException):
-            google_notification(self.settings, payload, None)
-        with patch('app.platform.legacy_notifications.verify_google_push'):
-            result = google_notification(self.settings, payload, 'Bearer synthetic')
-            self.assertEqual(result['status'], 'revoked')
-            self.assertEqual(google_notification(self.settings, payload, 'Bearer synthetic')['status'], 'already_revoked')
+        self.add('token-a', 'order-renewal')
+        self.grant()
+        self.void('order-renewal')
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 17)
+        self.assertEqual(self.scalar('SELECT state FROM legacy_subscription_grants'), 'granted')
+        self.assertEqual(self.profile()['storeEntitlements'], [])
 
-    def test_fake_verifier_cannot_be_used_in_production(self):
-        with self.assertRaises(HTTPException):
-            self.grant(settings=replace(self.settings, app_env='production'))
+    def test_source_order_refund_discovered_during_reconcile_after_renewal(self):
+        self.grant()
+        self.add('token-a', 'order-renewal')
+        self.orders['order-a']['state'] = 'REFUNDED'
+        result = reconcile(self.settings, apply=True, **self.verification())
+        self.assertEqual(result['status'], 'revoked')
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 7)
+        self.assertEqual(len(self.profile()['storeEntitlements']), 1)
 
-    def test_batch_report_redaction_and_retry(self):
+    def test_void_before_claim_wins_even_against_stale_processed_order(self):
+        self.void()
+        self.assertEqual(self.grant()['creditsGranted'], 0)
+        self.assertEqual(self.profile()['storeEntitlements'], [])
+
+    def test_revoked_token_before_claim_never_reactivates(self):
+        self.subs['token-a']['subscriptionState'] = 'SUBSCRIPTION_STATE_EXPIRED'
+        self.notice(12)
+        self.add('token-a', 'order-a')
+        self.assertEqual(self.grant()['creditsGranted'], 0)
+        self.assertEqual(self.profile()['storeEntitlements'], [])
+
+    def test_source_revocation_and_other_renewal_revocation(self):
+        self.grant()
+        self.subs['token-a']['subscriptionState'] = 'SUBSCRIPTION_STATE_EXPIRED'
+        self.notice(12)
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 7)
+
+    def test_dry_run_rolls_back_every_write_including_bindings_and_reversals(self):
+        self.assertEqual(self.grant(apply=False)['status'], 'would_grant')
+        for table in ('legacy_subscription_lineages', 'legacy_subscription_tokens', 'legacy_subscription_grants', 'legacy_subscription_audit', 'platform_entitlements', 'platform_credit_ledger'):
+            self.assertEqual(self.scalar('SELECT count(*) FROM ' + table), 0)
+        self.grant()
+        self.orders['order-a']['state'] = 'REFUNDED'
+        self.assertEqual(reconcile(self.settings, apply=False, **self.verification())['status'], 'would_revoke')
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 17)
+
+    def test_grant_switch_does_not_disable_entitlement_sync_or_refunds(self):
+        self.assertFalse(get_settings().legacy_grant_enabled)
+        off = replace(self.settings, legacy_grant_enabled=False)
+        self.assertEqual(self.grant(settings=off)['status'], 'grant_disabled')
+        self.assertEqual(len(self.profile()['storeEntitlements']), 1)
+        self.grant()
+        self.push({'voidedPurchaseNotification': {'productType': 1, 'purchaseToken': 'token-a', 'orderId': 'order-a'}}, settings=off)
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 7)
+
+    def test_authenticated_rtdn_required(self):
+        with self.assertRaises(HTTPException) as failure:
+            google_notification(self.settings, {}, None)
+        self.assertEqual(failure.exception.status_code, 403)
+        with patch('google.oauth2.id_token.verify_oauth2_token', return_value={'email': 'wrong', 'email_verified': True}):
+            with self.assertRaises(HTTPException): verify_google_push(self.settings, 'Bearer synthetic')
+
+    def test_restore_api_returns_expiry_and_no_raw_receipt(self):
+        with patch('app.platform.routes._settings', return_value=self.settings):
+            reply = self.client.post('/api/mobile/v1/store/restore', headers=self.headers, json={
+                'platform': 'android', 'productId': PRODUCT, 'verificationData': 'token-a', 'restored': True})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(reply.json()['legacyMigration']['creditsGranted'], 10)
+        self.assertTrue(reply.json()['expiresAt'])
+        self.assertNotIn('token-a', reply.text)
+        self.assertNotIn('order-a', reply.text)
+
+    def test_fake_transport_cannot_be_used_in_production(self):
+        with self.assertRaises(HTTPException): _session(replace(self.settings, app_env='production', store_verifier_mode='fake'))
+
+    def test_acknowledgement_is_after_commit_and_retry_does_not_regrant(self):
+        self.subs['token-a']['acknowledgementState'] = 'ACKNOWLEDGEMENT_STATE_PENDING'
+        with patch('app.platform.legacy_migration.acknowledge_legacy', side_effect=HTTPException(503, 'synthetic')):
+            with self.assertRaises(HTTPException): self.grant()
+        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_subscription_grants'), 1)
+        with patch('app.platform.legacy_migration.acknowledge_legacy') as ack:
+            self.assertEqual(self.grant()['creditsGranted'], 0)
+            ack.assert_called_once()
+
+    def test_concurrent_void_and_claim_never_leave_the_grant_available(self):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claim, refund = pool.submit(self.grant), pool.submit(self.void)
+            claim.result(); refund.result()
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 7)
+        self.assertEqual(self.profile()['storeEntitlements'], [])
+
+    def test_other_renewal_revocation_does_not_reverse_source(self):
+        self.grant()
+        self.add('token-a', 'order-renewal', state='EXPIRED')
+        self.notice(12)
+        self.assertEqual(self.scalar('SELECT state FROM legacy_subscription_grants'), 'granted')
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 17)
+        self.assertEqual(self.profile()['storeEntitlements'], [])
+
+    def test_source_chargeback_reconciles_from_google_order(self):
+        self.grant()
+        self.orders['order-a']['state'] = 'REFUNDED'
+        self.orders['order-a']['orderHistory'] = {'refundEvent': {'refundReason': 'CHARGEBACK'}}
+        reconcile(self.settings, apply=True, **self.verification())
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 7)
+
+    def test_database_failure_rolls_back_ledger_and_binding_together(self):
+        with patch('app.platform.legacy_migration._audit', side_effect=RuntimeError('synthetic failure')):
+            with self.assertRaises(RuntimeError): self.grant()
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 7)
+        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_subscription_lineages'), 0)
+        self.assertEqual(self.scalar('SELECT count(*) FROM platform_credit_ledger'), 0)
+
+    def test_cli_redaction_dry_run_and_apply_are_retry_safe(self):
         import importlib.util
-        path = Path(__file__).resolve().parents[2] / 'scripts/legacy_store_migration.py'
-        spec = importlib.util.spec_from_file_location('legacy_cli', path)
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location('legacy_cli', Path(__file__).resolve().parents[2] / 'scripts' / 'legacy_store_migration.py')
         cli = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cli)
-        evidence = self.evidence()
-        row = {'userId': self.user, 'platform': 'android', 'productId': evidence['product_id'],
-               'verificationData': evidence['verification_data']}
-        result = list(cli.run_batch(self.settings, ['invalid-secret-token', json.dumps(row)]))
-        self.assertEqual([r['status'] for r in result], ['invalid_input', 'would_grant'])
-        text = json.dumps(result)
-        for secret in ('invalid-secret-token', 'sensitive-purchase-token', self.user, self.token):
-            self.assertNotIn(secret, text)
-        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_store_purchases'), 0)
-        self.assertEqual(list(cli.run_batch(self.settings, [json.dumps(row)], apply=True))[0]['status'], 'granted')
-        self.assertEqual(list(cli.run_batch(self.settings, [json.dumps(row)], apply=True))[0]['status'], 'already_granted')
+        rows = [json.dumps({'userId': self.user, 'platform': 'android', 'productId': PRODUCT, 'verificationData': 'token-a'})]
+        dry = list(cli.run_batch(self.settings, rows))[0]
+        self.assertEqual(dry['status'], 'would_grant')
+        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_subscription_grants'), 0)
+        first = list(cli.run_batch(self.settings, rows, apply=True))[0]
+        second = list(cli.run_batch(self.settings, rows, apply=True))[0]
+        self.assertEqual((first['creditsGranted'], second['creditsGranted']), (10, 0))
+        report = json.dumps([dry, first, second])
+        for private in ('token-a', 'order-a', self.user, self.account): self.assertNotIn(private, report)
 
+    def test_out_of_app_repurchase_requires_stored_owner_and_keeps_lineage(self):
+        self.add('token-b', 'order-b')
+        self.subs['token-b']['outOfAppPurchaseContext'] = {'expiredPurchaseToken': 'token-a'}
+        with self.assertRaises(HTTPException): self.grant('token-b')
+        self.grant()
+        del self.subs['token-a']
+        self.assertEqual(self.grant('token-b')['creditsGranted'], 0)
+        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_subscription_lineages'), 1)
 
-class ProviderVerificationTest(unittest.TestCase):
-    def test_google_pending_refund_promo_reward_sandbox_product_and_caller_key(self):
-        settings = get_settings()
-        verifier = Mock()
-        response = Mock(status_code=200)
-        verifier._session.return_value.get.return_value = response
-        good = dict(productId='legacy', orderId='order', purchaseState=0, consumptionState=0,
-                    purchaseTimeMillis='1700000000000', acknowledgementState=1)
-        with patch('app.platform.legacy_verifier.GooglePlayVerifier', return_value=verifier):
-            response.json.return_value = good
-            accepted = google_purchase(settings, 'legacy', 'raw-token', 'order')
-            self.assertNotIn('raw-token', accepted.identity)
-            for change in ({'purchaseType': 0}, {'purchaseType': 1}, {'purchaseType': 2},
-                           {'productId': 'different'}, {'quantity': 2}, {'consumptionState': 1}, {'refundableQuantity': 0}):
-                response.json.return_value = {**good, **change}
-                with self.subTest(change=change), self.assertRaises(HTTPException):
-                    google_purchase(settings, 'legacy', 'raw-token', None)
-            for state, expected in ((1, 'revoked'), (2, 'pending')):
-                response.json.return_value = {**good, 'purchaseState': state}
-                self.assertEqual(google_purchase(settings, 'legacy', 'raw-token', None).state, expected)
-            response.json.return_value = good
-            with self.assertRaises(HTTPException):
-                google_purchase(settings, 'legacy', 'raw-token', 'client-invented-order')
+    def test_order_only_reconciliation_works_after_token_inventory_is_unavailable(self):
+        from app.platform.legacy_migration import reconcile_order
+        self.grant()
+        self.subs.clear()
+        self.orders['order-a']['state'] = 'REFUNDED'
+        self.assertEqual(reconcile_order(self.settings, order_id='order-a')['status'], 'would_revoke')
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 17)
+        self.assertEqual(reconcile_order(self.settings, order_id='order-a', apply=True)['status'], 'revoked')
+        self.assertEqual(self.profile()['creditSummary']['paidRemaining'], 7)
+        with self.assertRaises(HTTPException): reconcile_order(self.settings, order_id='unknown', apply=True)
 
-    def test_apple_requires_current_api_nonconsumable_paid_owned_purchase(self):
-        good = dict(transactionId='tx', originalTransactionId='original', productId='legacy',
-                    type='Non-Consumable', inAppOwnershipType='PURCHASED', revocationDate=None,
-                    appAccountToken='account', price=4900000, originalPurchaseDate=1700000000000, purchaseDate=1700000000000)
-        verifier = Mock()
-        verifier.verify_and_decode_signed_transaction.return_value = SimpleNamespace(transactionId='tx', productId='legacy')
-        with patch('app.platform.legacy_verifier.apple_verifier', return_value=verifier), patch('app.platform.legacy_verifier._apple_current') as current:
-            current.return_value = SimpleNamespace(**good)
-            self.assertEqual(apple_purchase(get_settings(), 'legacy', 'signed.payload.value', 'tx').state, 'purchased')
-            current.assert_called_once()
-            for change in ({'price': 0}, {'price': None}, {'type': 'Auto-Renewable Subscription'},
-                           {'inAppOwnershipType': 'FAMILY_SHARED'}, {'transactionId': 'other'}, {'productId': 'other'}):
-                current.return_value = SimpleNamespace(**{**good, **change})
-                with self.subTest(change=change), self.assertRaises(HTTPException):
-                    apple_purchase(get_settings(), 'legacy', 'signed.payload.value', 'tx')
-            current.return_value = SimpleNamespace(**{**good, 'revocationDate': 1700000000001})
-            self.assertEqual(apple_purchase(get_settings(), 'legacy', 'signed.payload.value', 'tx').state, 'revoked')
+    def test_superseded_issued_grants_block_activation(self):
+        self.grant()
+        with psycopg.connect(self.database_url) as c:
+            c.execute("""INSERT INTO legacy_store_purchases(id,platform,identity_digest,product_id,user_id,state,
+                credits_granted,grant_ledger_id,evidence_ref)
+                SELECT id,'android',repeat('a',64),'remove_ads_monthly',user_id,'granted',10,grant_ledger_id,'superseded-test'
+                FROM legacy_subscription_grants""")
+        other, _, headers = self._create_user()
+        account = self.client.get('/api/mobile/v1/store/catalog?platform=android', headers=headers).json()['accountToken']
+        self.add('token-other', 'order-other', account=account)
+        with self.assertRaises(HTTPException): self.grant('token-other', user_id=other)
+        self.assertEqual(self.scalar('SELECT count(*) FROM legacy_subscription_grants'), 1)
 
-    def test_official_apple_sdk_rejects_unsigned_receipt_and_invalid_notification(self):
-        from appstoreserverlibrary.signed_data_verifier import SignedDataVerifier, VerificationException
-        from appstoreserverlibrary.models.Environment import Environment
-        verifier = SignedDataVerifier([], True, Environment.PRODUCTION, 'test.bundle', 123)
-        with self.assertRaises(VerificationException):
-            verifier.verify_and_decode_signed_transaction('unsigned.invalid.data')
-        with self.assertRaises(VerificationException):
-            verifier.verify_and_decode_notification('unsigned.invalid.data')
+    def test_expiry_during_provider_lookup_prevents_grant_and_ack(self):
+        self.subs['token-a']['acknowledgementState'] = 'ACKNOWLEDGEMENT_STATE_PENDING'
+        with patch('app.platform.legacy_migration.utcnow', return_value=now()+timedelta(days=31)), patch('app.platform.legacy_migration.acknowledge_legacy') as ack:
+            self.assertEqual(self.grant()['creditsGranted'], 0)
+            ack.assert_not_called()
 
-    def test_google_push_rejects_wrong_audience_email_or_unverified_identity(self):
-        settings = replace(get_settings(), google_rtdn_audience='https://test', google_rtdn_email='verified@example.test')
-        for claim in ({'email': 'other', 'email_verified': True}, {'email': 'verified@example.test', 'email_verified': False}):
-            with patch('google.oauth2.id_token.verify_oauth2_token', return_value=claim), self.assertRaises(HTTPException):
-                verify_google_push(settings, 'Bearer token')
-        with patch('google.oauth2.id_token.verify_oauth2_token', side_effect=ValueError('bad audience')), self.assertRaises(HTTPException):
-            verify_google_push(settings, 'Bearer token')
+    def test_ineligible_paid_state_does_not_acknowledge(self):
+        self.subs['token-a']['acknowledgementState'] = 'ACKNOWLEDGEMENT_STATE_PENDING'
+        self.orders['order-a']['state'] = 'REFUNDED'
+        with patch('app.platform.legacy_migration.acknowledge_legacy') as ack:
+            self.grant()
+            ack.assert_not_called()
+
+    def test_old_one_time_verifiers_cannot_process_any_legacy_product(self):
+        from app.platform.store import AppleStoreVerifier, GooglePlayVerifier, FakeStoreVerifier
+        for verifier in (object.__new__(AppleStoreVerifier), object.__new__(GooglePlayVerifier), FakeStoreVerifier('android')):
+            with self.assertRaises(HTTPException) as failure:
+                verifier.verify(product_id=PRODUCT, verification_data='synthetic', transaction_id=None, account_token=self.account)
+            self.assertEqual(failure.exception.status_code, 410)
+        with self.assertRaises(HTTPException):
+            object.__new__(GooglePlayVerifier).post_commit(product_id=PRODUCT, verification_data='synthetic')

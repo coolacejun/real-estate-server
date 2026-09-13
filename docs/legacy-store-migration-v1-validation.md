@@ -1,60 +1,49 @@
-# Legacy migration v1 validation — 2026-09-13
+# Subscription migration v1 validation — 2026-09-13
 
-Prepared on `work/legacy-credit-migration-v1-20260913` from server `02f3b1152b77154325099214373fa30c2f765e3e`. Mobile branch of the same name starts at `f481b2e88d4736a600b7c503ba3663114d868d6f`. Web contract is fixed at `5b50f83370bc140d4d899a5f0da1b812a35600cf`; no web source was edited.
+This record supersedes the prior non-consumable/permanent-entitlement validation. Final contract: Google Play `remove_ads_monthly`, monthly auto-renewing paid entitlement, 10 credits once per account AND subscription lineage; ad removal expires with the subscription. Apple legacy paths fail closed. See the current runbook for the complete state and reconciliation policy.
 
-## Executed checks
+Prepared branch in both repositories: `work/legacy-credit-migration-v1-20260913`. Server base: `02f3b1152b77154325099214373fa30c2f765e3e`; mobile base: `f481b2e88d4736a600b7c503ba3663114d868d6f`; unchanged web contract: `5b50f83370bc140d4d899a5f0da1b812a35600cf`. The non-consumable preparation commits `0ece2c2bdc72e340e6a5af5af803372a81df6c67` / `68043cd59710ab56b114bbd8380ca272b8de4326` are superseded and must not be used as rollout targets. The mobile subscription revision is `acde3673d36f1f509d4ae5825d15ecc06fcc0406`; the server revision is the commit containing this record. Final hashes are also in the external result manifest.
+
+## Final checks
 
 | Check | Result |
 | --- | --- |
-| Server full regression, disposable PostgreSQL + local Chrome renderer | 106 passed, 0 failures/errors/skips |
-| Expanded final migration/provider suite after additional test cases | 23 passed, 0 failures/errors/skips |
-| Flutter payment/account/my-page tests | 31 passed |
-| Full Flutter suite | 299 passed, 2 failed; both reproduced on unchanged base SHA |
-| Analysis of seven changed Dart service/UI/test files | 0 errors, 0 warnings; 2 pre-existing deprecation infos |
-| Python syntax compilation; Compose/Traefik/OpenAPI YAML parsing | Passed |
-| Both prepared repositories: `git diff --check` | Passed |
+| Final server full suite, disposable PostgreSQL + local Chrome renderer | 126 passed, 0 failures/errors/skips; includes all 39 subscription tests |
+| Earlier focused subscription pass before the last one-time-verifier guard test | 38 passed; overlaps full suite |
+| Full Flutter suite | 303 passed, 2 existing failures |
+| Analysis of all 8 changed Dart files against the mobile base | 0 errors, 0 warnings; 2 existing deprecation infos |
+| Python syntax compilation; Compose and mobile OpenAPI YAML parsing | Passed |
+| Prepared server/mobile `git diff --check` | Passed |
 
-The final focused suite adds acknowledgement failure after commit, pre-existing store-owner mismatch, zero-balance/refund dry-run, Apple signed-notification handler and repeatable schema application. Production code was unchanged after the successful full server regression; only tests/docs were added. The 23-test result is not an additional independent full-suite run.
+Final server regression includes every last production edit: provider-linked and out-of-app stored-owner lineage handling, current expiry recheck after verification, expiry-aware profiles, order-only reconciliation, and complete removal of old one-time legacy verifier exceptions. No production code changed after that run.
 
-Coverage includes concurrent identical deliveries, Apple restored transaction aliases sharing an original ID, provider/platform/product/account mismatch, unbound receipt review, pending/revoked/unverifiable and nonhistorical purchases, fake-verifier production rejection, transaction rollback after ledger write, refund-before-grant and grant/refund races, repeat refund with no negative balance, preservation of ad removal, idempotent binding/apply/schema reruns, default-disabled/empty allowlist, dry-run no persistent writes, account-scoped history, CLI redaction and safe batch retry. Provider unit fixtures cover Google promo/reward/test/non-consumable checks, arbitrary caller order rejection, Apple current-API requirement/paid ownership/type checks, official SDK unsigned-input rejection and Google push identity rejection. No real provider transaction was used.
+Subscription coverage includes active/canceled/grace entitlement; pending/expired/paused/held/unknown exclusion; monthly base-plan and actual payment evidence; wrong SKU/prepaid/installment/test/free/promo/unpaid evidence; Apple rejection; account binding review and conflict; concurrency/replay; renewals/new/linked/out-of-app tokens; missing/cyclic ancestors; stored expired anchors; superseded-token ordering; immutable account/lineage grants; source versus unrelated renewal refund/revocation; chargeback; refund/revoke before claim; claim/refund races; nonnegative partial recovery; normal expiry without credit clawback; grant-disable independence; transaction rollback; dry-run rollback; CLI redaction and retry; OIDC authentication; acknowledgement after commit and retry; no acknowledgement for ineligible evidence; superseded 013 grant activation block; and refund reconciliation from recorded orders without a token inventory.
 
-Initial full-server failures were local test-environment omissions: five renderer cases lacked `PDF_BROWSER_PATH`, and one V2 parity case lacked the pinned `web` checkout. A local read-only contract checkout and local Chrome path resolved all six; no web implementation was changed. PostgreSQL requires an unsandboxed local process on this host because Windows restricted-token `pg_ctl` fails. All clusters were temporary loopback clusters created and stopped by the checked-in test runner, never an existing or production database.
+Flutter coverage includes exact Google SKU/future-expiry checks, missing/expired/Apple entries, expiry timer without another network response, known existing subscription purchase delivery via restore, rejected arbitrary legacy SKU, no new sale flow, server-only grant messaging, duplicate grant response, failed verification, logout clearing, plus the existing report/consumable suite. Installed Android plugin `in_app_purchase_android-0.5.0/lib/src/in_app_purchase_android_platform.dart:230` queries both inapp and subs during restore.
 
-## Pre-existing Flutter failures
+The two full Flutter failures are unchanged `report_login_gate_test.dart:122` (narrow login gate cancellation) and `:270` (browser failure recovery). Both were previously reproduced on the untouched `f481b2e` baseline, and the final run has the same failures. The two analyzer infos are the existing `surfaceVariant` use at cadastral_draw_view.dart:49 and `cloudMapId` at map_view.dart:89. This revision does not modify those call sites.
 
-`test/report_login_gate_test.dart` fails at lines 122 and 270:
+## Local evidence and reproduction
 
-- `narrow login gate contains only provider actions and can cancel`
-- `browser failure is recoverable and successful callback restores flow`
+Logs are deliberately outside tracked repositories:
 
-Both fail identically in a separate clean detached checkout of `f481b2e` (that file's other two cases pass). They concern the login-dialog callback result, not legacy migration. No login-gate implementation or test was changed. Do not describe the whole Flutter suite as green. The changed my-page test had a stale `webReportCredits` constructor argument; it was updated to the current free/paid/available profile fields so the relevant UI suite can compile.
+- `C:/CodexWork/.legacy-credit-validation/subscription-regression-final/shared-archive-tests.log`
+- `C:/CodexWork/.legacy-credit-validation/subscription-focused-final/shared-archive-tests.log`
+- `C:/CodexWork/.legacy-credit-validation/subscription-flutter-regression.log`
+- `C:/CodexWork/.legacy-credit-validation/subscription-flutter-analyze.log`
+- `C:/CodexWork/.legacy-credit-validation/flutter-baseline-login.log`
+- `C:/CodexWork/output/legacy-credit-migration-20260913/result.json`
 
-The analysis infos are existing `surfaceVariant` and `cloudMapId` uses in the cadastral/map views; verified present in the base SHA. No unrelated deprecation refactor was made.
-
-## Reproduction and evidence
-
-Local untracked logs are under `C:/CodexWork/.legacy-credit-validation/`:
-
-- `regression-final/shared-archive-tests.log`: server 106-test pass.
-- `focused-final/shared-archive-tests.log`: expanded 23-test pass.
-- `flutter-focused-final.log`: 31-test pass.
-- `flutter-regression.log`: full Flutter 299 pass / 2 fail.
-- `flutter-baseline-login.log`: unchanged-base reproduction of those failures.
-- `flutter-analyze.log`: scoped analysis results.
-
-Server command pattern (set `PYTHONPATH` for the local test dependencies and `PDF_BROWSER_PATH` for the installed Chrome on Windows):
-
-```sh
-python scripts/run_shared_archive_tests.py --postgres-bin /path/to/postgres/bin --work-dir /temporary/validation --web-repo /path/to/pinned/web --pattern 'test_*.py'
-python scripts/run_shared_archive_tests.py --postgres-bin /path/to/postgres/bin --work-dir /temporary/focused --web-repo /path/to/pinned/web --pattern test_legacy_migration.py
-flutter test --no-pub test/payment_service_test.dart test/mobile_account_service_test.dart test/my_page_view_test.dart
-flutter test --no-pub
+```
+python scripts/run_shared_archive_tests.py --postgres-bin PATH --work-dir TEMP --web-repo PINNED_WEB --pattern 'test_*.py'
+flutter test --no-pub --reporter expanded
+flutter analyze --no-pub CHANGED_DART_FILES
 ```
 
-Original server/mobile branches were not changed. Mobile's pre-existing dirty PDF-selection UI and building-selection test, and both existing stashes, were preserved. Live remote ref confirmation was unavailable because the bundled Git could not run `remote-https`; the recorded integrated release and cached refs identify the base. Reconfirm integration state before any future merge/push.
+Original server/mobile integration branches and the web source remain untouched. The original mobile PDF-selection view, building-selection test edits, and two stashes remain present. Remote ref confirmation was unavailable in this host's bundled Git (`remote-https` helper missing); use the recorded integration bases and recheck before any eventual merge/push.
 
-## Still required before production enable
+## Remaining rollout work
 
-The prepared code and synthetic validation do not authorize activation. Exact console product/type/price/sale evidence, reviewed unbound-account claims, real Apple/Google verification and authenticated notification testing, a reviewed production dry-run, rollout/backup approval and explicit operational authorization remain required. Apple historical records missing positive signed price evidence and products not verified as non-consumables stay blocked. Linux/container/store end-to-end verification was not run on this Windows host. Docker CLI was not available; Compose was parsed and inspected, not built or deployed.
+Prepared defaults are disabled. Real Google subscriptionsv2/catalog/Orders permissions, actual monthly base-plan verification, authenticated subscription/void RTDN delivery, missing-account support bindings, an approved production dry-run, schema 014 and coordinated release authorization remain unperformed. There is no raw legacy token inventory: login alone cannot backfill every former subscriber. Unknown ownership/lineage or unavailable provider evidence stays closed for review. Old expired-token-only revoke events may require order evidence/support reconciliation if Google can no longer return the subscription.
 
-No real purchase, restore, consume/acknowledgement, report-credit deduction/grant, console edit, production DB/schema apply, push or deployment was performed. All grant/refund mutations in validation were synthetic and confined to the disposable database.
+Docker/Linux and store/device end-to-end verification were not run on this Windows host; Docker CLI was unavailable. No real purchase, restore, acknowledgement/consumption, credit grant/debit, console edit, production DB/schema apply, push or deployment occurred. DB mutations and provider responses in tests were synthetic and confined to disposable local clusters.

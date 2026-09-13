@@ -1,231 +1,191 @@
-"""Fresh provider verification for migration v1. Never log provider payloads."""
-from __future__ import annotations
-
-import json
-import re
+"""Google monthly subscription evidence; never persist raw purchase tokens."""
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-
+from urllib.parse import quote
 from fastapi import HTTPException
-
-from .config import PlatformSettings
 from .security import sha256_text
-from .store import AppleStoreVerifier, GooglePlayVerifier, PRODUCTS
 
+PRODUCT = 'remove_ads_monthly'
+ACCESS_STATES = {'SUBSCRIPTION_STATE_ACTIVE', 'SUBSCRIPTION_STATE_CANCELED', 'SUBSCRIPTION_STATE_IN_GRACE_PERIOD'}
+REFUND_STATES = {'REFUNDED', 'PARTIALLY_REFUNDED'}
 
-@dataclass(frozen=True)
-class LegacyRule:
-    platform: str
-    product_id: str
-    purchase_before_ms: int
-    evidence_ref: str
+def now():
+    return datetime.now(timezone.utc)
 
-
-def rules(settings: PlatformSettings) -> list[LegacyRule]:
-    if not settings.legacy_policy_file:
-        return []
+def timestamp(value):
     try:
-        data = json.loads(Path(settings.legacy_policy_file).read_text(encoding='utf-8'))
-        if data['version'] != 1 or not isinstance(data['products'], list):
-            raise ValueError()
-        result = []
-        for row in data['products']:
-            if (row['platform'] not in ('ios', 'android') or row['kind'] != 'non_consumable'
-                    or row['productId'] in PRODUCTS
-                    or not re.fullmatch(r'[A-Za-z0-9_.-]{1,200}', row['productId'])
-                    or not re.fullmatch(r'[A-Za-z0-9_./:-]{1,200}', row['evidenceRef'])):
-                raise ValueError()
-            cutoff = datetime.fromisoformat(row['purchaseBefore'].replace('Z', '+00:00'))
-            if cutoff.tzinfo is None or cutoff > datetime.now(timezone.utc):
-                raise ValueError()
-            result.append(LegacyRule(row['platform'], row['productId'], int(cutoff.timestamp()*1000), row['evidenceRef']))
-        if len({(r.platform, r.product_id) for r in result}) != len(result):
+        result = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if result.tzinfo is None:
             raise ValueError()
         return result
-    except (OSError, ValueError, KeyError, TypeError):
-        raise HTTPException(503, 'legacy policy configuration is invalid') from None
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(422, 'invalid Google subscription timestamp') from None
 
+def token_digest(token):
+    if not isinstance(token, str) or not token or len(token) > 16384:
+        raise HTTPException(422, 'invalid Google subscription token')
+    return sha256_text('google-subscription:' + token)
 
-def rule_for(settings, platform, product_id):
-    rule = next((r for r in rules(settings) if r.platform == platform and r.product_id == product_id), None)
-    if rule is None:
-        raise HTTPException(422, 'legacy product is not allowlisted')
-    return rule
+def require_product(platform, product_id):
+    if platform != 'android' or product_id != PRODUCT:
+        raise HTTPException(410, 'legacy restoration is Google monthly subscription only')
 
+def _session(settings):
+    if settings.store_verifier_mode != 'production':
+        raise HTTPException(503, 'Google subscription verifier requires production transport')
+    try:
+        from google.oauth2 import service_account
+        from google.auth.transport.requests import AuthorizedSession
+        credentials = service_account.Credentials.from_service_account_file(settings.google_play_service_account_file,
+            scopes=['https://www.googleapis.com/auth/androidpublisher'])
+        if not settings.google_play_package_name:
+            raise ValueError()
+        return AuthorizedSession(credentials)
+    except Exception:
+        raise HTTPException(503, 'Google subscription verifier is not configured') from None
+
+def _url(settings, resource):
+    return 'https://androidpublisher.googleapis.com/androidpublisher/v3/applications/' + quote(settings.google_play_package_name, safe='') + '/' + resource
+
+def _get_json(settings, resource):
+    try:
+        reply = _session(settings).get(_url(settings, resource), timeout=15, allow_redirects=False)
+        if reply.status_code != 200:
+            raise HTTPException(503 if reply.status_code >= 500 or reply.status_code in (401, 403, 429) else 422, 'Google subscription evidence unavailable')
+        result = reply.json()
+        if not isinstance(result, dict):
+            raise ValueError()
+        return result
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(503, 'Google subscription verification unavailable') from None
+
+def get_subscription(settings, token):
+    token_digest(token)
+    return _get_json(settings, 'purchases/subscriptionsv2/tokens/' + quote(token, safe=''))
+
+def get_order(settings, order_id):
+    if not isinstance(order_id, str) or not 0 < len(order_id) <= 250:
+        raise HTTPException(422, 'invalid Google order identity')
+    result = _get_json(settings, 'orders/' + quote(order_id, safe=''))
+    if result.get('orderId') != order_id:
+        raise HTTPException(422, 'Google order identity mismatch')
+    return result
+
+def order_is_void(order):
+    return order.get('state') in REFUND_STATES
+
+def validate_order(order, tokens, base_plan):
+    lines = order.get('lineItems', [])
+    if len(lines) != 1 or lines[0].get('productId') != PRODUCT or order.get('purchaseToken') not in tokens:
+        raise HTTPException(422, 'Google payment product or token mismatch')
+    line = lines[0]
+    details = line.get('subscriptionDetails', {})
+    if details.get('basePlanId') != base_plan:
+        raise HTTPException(422, 'Google payment base plan mismatch')
+    phase = details.get('offerPhaseDetails', {})
+    paid_phase = ('baseDetails' in phase or 'introductoryPriceDetails' in phase
+        or details.get('offerPhase') in ('BASE', 'INTRODUCTORY')
+        or phase.get('prorationPeriodDetails', {}).get('originalOfferPhase') in ('BASE', 'INTRODUCTORY'))
+    try:
+        money = line['total']
+        positive = int(money.get('units', 0)) * 1000000000 + int(money.get('nanos', 0)) > 0
+        currency = bool(money['currencyCode'])
+    except (KeyError, TypeError, ValueError):
+        positive = currency = False
+    return order.get('state') == 'PROCESSED' and paid_phase and positive and currency
 
 @dataclass(frozen=True)
-class LegacyPurchase:
-    platform: str
-    product_id: str
-    identity: str  # digest of provider originalTransactionId or purchaseToken
-    aliases: tuple[str, ...]
-    old_keys: tuple[str, ...]
+class Subscription:
+    token: str
+    digest: str
+    linked_token: str | None
     account_token: str
-    purchased_ms: int
     state: str
-    receipt_digest: str
+    expires_at: datetime | None
+    entitled: bool
+    latest_order_id: str | None
+    base_plan: str
+    acknowledged: bool
+    anchor_only: bool = False
 
+@dataclass(frozen=True)
+class VerifiedSubscription:
+    chain: tuple[Subscription, ...]
+    anchor_digest: str | None
+    eligible: bool
+    observed_at: datetime
+    order: dict | None
+    @property
+    def current(self):
+        return self.chain[0]
 
-def identity_digest(kind: str, value: str) -> str:
-    if not value or len(value) > 16384:
-        raise HTTPException(422, 'store identity is invalid')
-    return sha256_text(kind + ':' + value)
+def _parse(token, data, observed):
+    lines = data.get('lineItems', [])
+    if (data.get('kind') != 'androidpublisher#subscriptionPurchaseV2' or 'testPurchase' in data
+            or len(lines) != 1 or lines[0].get('productId') != PRODUCT):
+        raise HTTPException(422, 'Google subscription product evidence rejected')
+    line = lines[0]
+    if ('autoRenewingPlan' not in line or 'prepaidPlan' in line or 'installmentDetails' in line['autoRenewingPlan']):
+        raise HTTPException(422, 'Google monthly auto-renewing subscription required')
+    expiry = timestamp(line['expiryTime']) if line.get('expiryTime') else None
+    state = data.get('subscriptionState', '')
+    replaced = 'replacementCancellation' in data.get('canceledStateContext', {})
+    linked = data.get('linkedPurchaseToken')
+    expired = data.get('outOfAppPurchaseContext', {}).get('expiredPurchaseToken')
+    return Subscription(token, token_digest(token), linked or expired,
+        data.get('externalAccountIdentifiers', {}).get('obfuscatedExternalAccountId', ''),
+        state, expiry, state in ACCESS_STATES and expiry is not None and expiry > observed and not replaced,
+        line.get('latestSuccessfulOrderId'), line.get('offerDetails', {}).get('basePlanId', ''),
+        data.get('acknowledgementState') == 'ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED', bool(expired and not linked))
 
+def verify_legacy(settings, *, platform, product_id, verification_data, transaction_id=None, known_anchor=None):
+    require_product(platform, product_id)
+    token_digest(verification_data)
+    observed, token, chain, seen, anchor = now(), verification_data, [], set(), None
+    for depth in range(32):
+        digest = token_digest(token)
+        if digest in seen:
+            raise HTTPException(409, 'Google subscription lineage cycle')
+        seen.add(digest)
+        if depth and known_anchor and known_anchor(digest):
+            anchor = digest
+            break
+        item = _parse(token, get_subscription(settings, token), observed)
+        chain.append(item)
+        if item.anchor_only:
+            # Google permits this expired token only for a stored user mapping,
+            # never speculative historical API lookup or first-claim binding.
+            anchor = token_digest(item.linked_token)
+            if anchor in seen or not known_anchor or not known_anchor(anchor):
+                raise HTTPException(409, 'out-of-app subscription owner requires stored mapping')
+            break
+        if not item.linked_token:
+            break
+        token = item.linked_token
+    else:
+        raise HTTPException(409, 'Google subscription lineage requires review')
+    current, order, eligible = chain[0], None, False
+    if current.entitled:
+        catalog = _get_json(settings, 'subscriptions/' + PRODUCT)
+        plans = [p for p in catalog.get('basePlans', []) if p.get('basePlanId') == current.base_plan]
+        if (catalog.get('productId') != PRODUCT or len(plans) != 1
+                or plans[0].get('autoRenewingBasePlanType', {}).get('billingPeriodDuration') != 'P1M'):
+            raise HTTPException(422, 'Google monthly billing period evidence required')
+        if current.latest_order_id:
+            order = get_order(settings, current.latest_order_id)
+            eligible = validate_order(order, [p.token for p in chain], current.base_plan)
+    return VerifiedSubscription(tuple(chain), anchor, eligible, observed, order)
 
-def apple_verifier(settings):
-    try:
-        from appstoreserverlibrary.signed_data_verifier import SignedDataVerifier
-        from appstoreserverlibrary.models.Environment import Environment
-        from cryptography import x509
-        from cryptography.hazmat.primitives.serialization import Encoding
-        root = Path(settings.apple_root_ca_file).read_bytes()
-        if root.startswith(b'-----BEGIN'):
-            root = x509.load_pem_x509_certificate(root).public_bytes(Encoding.DER)
-        return SignedDataVerifier([root], True, Environment.PRODUCTION,
-                                  settings.apple_bundle_id, int(settings.apple_app_id))
-    except Exception:
-        raise HTTPException(503, 'Apple migration verifier is not configured') from None
-
-
-def _apple_current(settings, transaction_id):
-    # SDK verifies certificate purpose, chain, app/environment and online OCSP.
-    # The submitted signed receipt alone can be stale after a refund.
-    try:
-        from appstoreserverlibrary.models.Environment import Environment
-        from appstoreserverlibrary.api_client import AppStoreServerAPIClient
-        client = AppStoreServerAPIClient(Path(settings.apple_iap_key_file).read_bytes(),
-            settings.apple_iap_key_id, settings.apple_iap_issuer_id,
-            settings.apple_bundle_id, Environment.PRODUCTION)
-        reply = client.get_transaction_info(transaction_id)
-        return apple_verifier(settings).verify_and_decode_signed_transaction(reply.signedTransactionInfo)
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(502, 'Apple current transaction verification unavailable') from None
-
-
-def _enum(value):
-    return getattr(value, 'value', value)
-
-
-def apple_purchase(settings, product_id, data, transaction_id):
-    try:
-        wrapper = json.loads(data)
-        signed = wrapper.get('signedTransactionInfo', data) if isinstance(wrapper, dict) else data
-    except ValueError:
-        signed = data
-    try:
-        if signed.count('.') == 2:
-            submitted = apple_verifier(settings).verify_and_decode_signed_transaction(signed)
-            key = submitted.transactionId
-            if submitted.productId != product_id:
-                raise ValueError()
-        else:
-            # Legacy receipt endpoint checks the app receipt; current Server API
-            # below remains mandatory, including for historical app receipts.
-            receipt = AppleStoreVerifier(settings)._legacy_receipt(data)
-            body = receipt.get('receipt', {})
-            if body.get('bundle_id') != settings.apple_bundle_id or receipt.get('environment') != 'Production':
-                raise ValueError()
-            items = [r for r in body.get('in_app', []) if r.get('product_id') == product_id
-                     and (not transaction_id or r.get('transaction_id') == transaction_id)]
-            key = max(items, key=lambda r: int(r.get('purchase_date_ms', 0)))['transaction_id']
-        if transaction_id and key != transaction_id:
-            raise ValueError()
-        item = _apple_current(settings, key)
-        if (item.transactionId != key or item.productId != product_id
-                or _enum(item.type) != 'Non-Consumable'
-                or _enum(item.inAppOwnershipType) != 'PURCHASED'):
-            raise ValueError()
-        original = item.originalTransactionId
-        canonical = identity_digest('apple', original)
-        state = 'revoked' if item.revocationDate is not None else 'purchased'
-        # Missing or zero-price evidence cannot establish an actual paid sale.
-        if state == 'purchased' and (getattr(item, 'price', None) is None or item.price <= 0):
-            raise ValueError()
-        return LegacyPurchase('ios', product_id, canonical,
-            tuple(sorted({canonical, identity_digest('apple', key)})), (key, original),
-            str(item.appAccountToken or ''), int(item.originalPurchaseDate or item.purchaseDate),
-            state, sha256_text(data))
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(422, 'Apple legacy purchase evidence rejected') from None
-
-
-def google_purchase(settings, product_id, data, transaction_id):
-    verifier = GooglePlayVerifier(settings)
-    token = data.strip()
-    try:
-        response = verifier._session().get(verifier._url(product_id, token), timeout=15)
-        if response.status_code != 200:
-            raise HTTPException(502 if response.status_code >= 500 else 422, 'Google legacy verification rejected')
-        item = response.json()
-        if (item.get('productId', product_id) != product_id
-                or item.get('purchaseToken', token) != token
-                or int(item.get('quantity', 1)) != 1):
-            raise ValueError()
-        order = str(item.get('orderId') or '')
-        if transaction_id and transaction_id != order:
-            raise ValueError()
-        state = {0: 'purchased', 1: 'revoked', 2: 'pending'}.get(item.get('purchaseState'), 'unverifiable')
-        if state == 'purchased' and (not order or 'purchaseType' in item
-                                   or item.get('consumptionState') != 0
-                                   or item.get('refundableQuantity', 1) != 1):
-            raise ValueError()
-        canonical = identity_digest('google-token', token)
-        aliases = {canonical}
-        if order:
-            aliases.add(identity_digest('google-order', order))
-        return LegacyPurchase('android', product_id, canonical, tuple(sorted(aliases)),
-            tuple(k for k in (order, sha256_text(token)) if k),
-            str(item.get('obfuscatedExternalAccountId') or ''),
-            int(item['purchaseTimeMillis']), state, sha256_text(data))
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(422, 'Google legacy purchase evidence rejected') from None
-
-
-def verify_legacy(settings, *, platform, product_id, verification_data, transaction_id=None):
-    rule_for(settings, platform, product_id)
-    if not verification_data or len(verification_data) > 2*1024*1024:
-        raise HTTPException(422, 'legacy verification data is invalid')
-    # Fixtures are impossible outside an explicitly isolated test environment.
-    if settings.store_verifier_mode == 'fake':
-        if settings.app_env != 'test':
-            raise HTTPException(503, 'fake legacy verifier is forbidden')
-        try:
-            p = json.loads(verification_data)
-            if not p.get('valid') or p['productId'] != product_id or p['platform'] != platform:
-                raise ValueError()
-            key = p['originalTransactionId'] if platform == 'ios' else p['purchaseToken']
-            ident = identity_digest('apple' if platform == 'ios' else 'google-token', key)
-            alias = identity_digest('apple' if platform == 'ios' else 'google-order', p['transactionId'])
-            return LegacyPurchase(platform, product_id, ident, tuple(sorted({ident, alias})),
-                (key, p['transactionId']), p.get('accountToken', ''), p['purchasedMs'], p['state'], sha256_text(verification_data))
-        except Exception:
-            raise HTTPException(422, 'legacy fixture rejected') from None
-    if settings.store_verifier_mode != 'production':
-        raise HTTPException(503, 'legacy verifier mode is invalid')
-    return (apple_purchase if platform == 'ios' else google_purchase)(settings, product_id, verification_data, transaction_id)
-
-
-def acknowledge_legacy(settings, product_id, verification_data):
-    if settings.app_env == 'test' and settings.store_verifier_mode == 'fake':
+def acknowledge_legacy(settings, token):
+    current = _parse(token, get_subscription(settings, token), now())
+    if current.acknowledged or not current.entitled:
         return
-    verifier = GooglePlayVerifier(settings)
     try:
-        session = verifier._session()
-        url = verifier._url(product_id, verification_data.strip())
-        current = session.get(url, timeout=15)
-        if current.status_code != 200 or current.json().get('purchaseState') != 0:
-            raise ValueError()
-        if current.json().get('acknowledgementState') == 1:
-            return
-        reply = session.post(url + ':acknowledge', json={}, timeout=15)
+        reply = _session(settings).post(_url(settings, 'purchases/subscriptions/' + PRODUCT
+            + '/tokens/' + quote(token, safe='') + ':acknowledge'), json={}, timeout=15, allow_redirects=False)
         if reply.status_code not in (200, 204):
             raise ValueError()
     except Exception:
-        raise HTTPException(503, 'legacy acknowledgement must be retried') from None
+        raise HTTPException(503, 'subscription acknowledgement must be retried') from None

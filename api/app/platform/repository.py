@@ -38,7 +38,7 @@ def connect(settings: PlatformSettings) -> Iterator[psycopg.Connection]:
 def assert_schema(connection: psycopg.Connection) -> None:
     try:
         row = connection.execute(
-            "SELECT version FROM schema_migrations WHERE version = '012_identity_connections'"
+            "SELECT version FROM schema_migrations WHERE version = '014_legacy_subscription_migration'"
         ).fetchone()
     except psycopg.Error as exc:
         raise HTTPException(status_code=503, detail="account database migration is required") from exc
@@ -180,8 +180,10 @@ def profile_payload(connection: psycopg.Connection, user_id: str) -> dict[str, A
     ).fetchall()
     entitlements = connection.execute(
         """
-        SELECT store, product_id, status, pricing_policy
-        FROM platform_entitlements WHERE user_id = %s AND status = 'active' ORDER BY created_at
+        SELECT store, product_id, status, pricing_policy, expires_at
+        FROM platform_entitlements WHERE user_id = %s AND status = 'active'
+          AND (pricing_policy <> 'legacy' OR (store='android' AND product_id='remove_ads_monthly'
+               AND expires_at > clock_timestamp())) ORDER BY created_at
         """,
         (user_id,),
     ).fetchall()
@@ -216,6 +218,7 @@ def profile_payload(connection: psycopg.Connection, user_id: str) -> dict[str, A
                 "productId": row["product_id"],
                 "status": row["status"],
                 "pricingPolicy": row["pricing_policy"],
+                "expiresAt": row["expires_at"].isoformat() if row["expires_at"] else None,
             }
             for row in entitlements
         ],

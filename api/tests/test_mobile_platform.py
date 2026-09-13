@@ -762,41 +762,12 @@ class MobilePlatformContractTest(unittest.TestCase):
         self.assertEqual(second.status_code, 200, second.text)
         self.assertEqual(self._credit_summary(headers)["paidRemaining"], 30)
 
-    def test_legacy_store_restore_creates_entitlement_without_credit_grant(self) -> None:
+    def test_apple_legacy_restore_is_unsupported(self) -> None:
         _, _, headers = self._create_user()
-        account = self.client.get(
-            "/api/mobile/v1/store/catalog?platform=ios", headers=headers
-        ).json()["accountToken"]
-        verification = json.dumps(
-            {
-                "valid": True,
-                "platform": "ios",
-                "productId": "remove_ads_monthly",
-                "accountToken": account,
-                "transactionId": "legacy-entitlement-restore-1",
-            },
-            sort_keys=True,
-        )
-        body = {
-            "platform": "ios",
-            "productId": "remove_ads_monthly",
-            "verificationData": verification,
-            "transactionId": "legacy-entitlement-restore-1",
-            "restored": True,
-        }
-        restored = self.client.post("/api/mobile/v1/store/restore", headers=headers, json=body)
-        repeated = self.client.post("/api/mobile/v1/store/restore", headers=headers, json=body)
-        self.assertEqual(restored.status_code, 200, restored.text)
-        self.assertEqual(restored.json()["creditsGranted"], 0)
-        self.assertEqual(restored.json()["pricingPolicy"], "legacy")
-        self.assertFalse(restored.json()["alreadyProcessed"])
-        self.assertTrue(repeated.json()["alreadyProcessed"])
-        profile = self.client.get("/api/mobile/v1/me", headers=headers).json()
-        self.assertEqual(profile["creditSummary"], {"freeRemaining": 3, "paidRemaining": 0, "availableCredits": 3})
-        self.assertEqual(
-            profile["storeEntitlements"],
-            [{"store": "ios", "productId": "remove_ads_monthly", "status": "active", "pricingPolicy": "legacy"}],
-        )
+        response = self.client.post('/api/mobile/v1/store/restore', headers=headers, json={
+            'platform': 'ios', 'productId': 'remove_ads_monthly', 'verificationData': 'old-receipt', 'restored': True})
+        self.assertEqual(response.status_code, 410)
+        self.assertEqual(self.client.get('/api/mobile/v1/me', headers=headers).json()['storeEntitlements'], [])
 
     def test_preview_final_archive_idempotency_ownership_and_regeneration(self) -> None:
         _, _, headers = self._create_user()

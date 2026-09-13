@@ -85,11 +85,6 @@ services:
       - STORE_VERIFIER_MODE=${STORE_VERIFIER_MODE:-production}
       - LEGACY_GRANT_ENABLED=${LEGACY_GRANT_ENABLED:-false}
       - LEGACY_NOTIFICATIONS_ENABLED=${LEGACY_NOTIFICATIONS_ENABLED:-false}
-      - LEGACY_POLICY_FILE=/run/secrets/legacy-store-policy.json
-      - APPLE_IAP_KEY_FILE=/run/secrets/apple-iap-key.p8
-      - APPLE_IAP_KEY_ID=${APPLE_IAP_KEY_ID:-}
-      - APPLE_IAP_ISSUER_ID=${APPLE_IAP_ISSUER_ID:-}
-      - APPLE_APP_ID=${APPLE_APP_ID:-}
       - GOOGLE_RTDN_AUDIENCE=${GOOGLE_RTDN_AUDIENCE:-}
       - GOOGLE_RTDN_EMAIL=${GOOGLE_RTDN_EMAIL:-}
       - APPLE_BUNDLE_ID=${APPLE_BUNDLE_ID:-}
@@ -120,8 +115,6 @@ services:
       - ${REPORT_ASSET_HOST_DIR:-./data/report-assets}:/data/report-assets
       - ${ENVIRONMENT_DATA_HOST_DIR:-./web/data}:/data/environment:ro
       - ${APPLE_ROOT_CA_HOST_FILE:-/dev/null}:/run/secrets/apple-root-ca.pem:ro
-      - ${LEGACY_POLICY_HOST_FILE:-./scripts/legacy_store_policy.example.json}:/run/secrets/legacy-store-policy.json:ro
-      - ${APPLE_IAP_KEY_HOST_FILE:-/dev/null}:/run/secrets/apple-iap-key.p8:ro
       - ${GOOGLE_PLAY_SERVICE_ACCOUNT_HOST_FILE:-/dev/null}:/run/secrets/google-play-service-account.json:ro
     depends_on:
       migrate:

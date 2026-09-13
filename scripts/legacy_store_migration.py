@@ -1,5 +1,6 @@
-"""Reviewed JSONL receipts -> repeatable v1 backfill. Dry-run is the default.
+"""Reviewed current Play subscription tokens -> repeatable v1 claims. Dry-run is the default.
 
+This is not automatic backfill: the server has no raw legacy token inventory.
 Inputs are sensitive. Reports never contain receipts, tokens, provider errors,
 account UUIDs, or raw transaction IDs. Grant and binding approval are separate.
 """
@@ -13,8 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'api'))
 from fastapi import HTTPException
 from app.platform.config import get_settings
-from app.platform.legacy_migration import approve_binding, process_legacy, reconcile
-from app.platform.legacy_verifier import verify_legacy
+from app.platform.legacy_migration import approve_binding, process_legacy, reconcile, reconcile_order
 
 
 def run_batch(settings, rows, *, mode='grant', apply=False):
@@ -23,10 +23,12 @@ def run_batch(settings, rows, *, mode='grant', apply=False):
             if len(line) > 3*1024*1024:
                 raise ValueError()
             row = json.loads(line)
-            verification = dict(platform=row['platform'], product_id=row['productId'],
-                verification_data=row['verificationData'], transaction_id=row.get('transactionId'))
-            if mode == 'reconcile':
-                result = reconcile(settings, purchase=verify_legacy(settings, **verification), apply=apply)
+            verification = dict(platform=row.get('platform'), product_id=row.get('productId'),
+                verification_data=row.get('verificationData'), transaction_id=row.get('transactionId'))
+            if mode == 'reconcile' and 'sourceOrderId' in row:
+                result = reconcile_order(settings, order_id=row['sourceOrderId'], apply=apply)
+            elif mode == 'reconcile':
+                result = reconcile(settings, apply=apply, **verification)
             else:
                 user_id = str(uuid.UUID(row['userId']))
                 if mode == 'bind':

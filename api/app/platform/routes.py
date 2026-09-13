@@ -271,11 +271,10 @@ def mobile_store_catalog(
             device_id=session["device_id"],
         )
     response.headers["Cache-Control"] = "private, no-store"
-    from .legacy_verifier import rules
     return {"accountToken": account_token, "products": catalog(normalized),
-            "legacyRestoreProductIds": sorted({'remove_ads_monthly'} | {
-                r.product_id for r in rules(settings) if r.platform == normalized}),
-            "legacyMigrationEnabled": settings.legacy_grant_enabled}
+            "legacyRestoreProductIds": ['remove_ads_monthly'] if normalized == 'android' else [],
+            "legacyMigrationEnabled": settings.legacy_grant_enabled and settings.legacy_notifications_enabled}
+
 
 
 async def _store_request(

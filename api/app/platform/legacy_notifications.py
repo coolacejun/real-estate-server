@@ -1,48 +1,14 @@
-"""Authenticated provider notifications, independent of the grant kill switch."""
+"""Authenticated Google RTDN; credit reversal matches the original grant order."""
 import base64
 import json
-from dataclasses import replace
-
 from fastapi import HTTPException
-from .legacy_verifier import (apple_verifier, identity_digest, LegacyPurchase, rule_for, rules,
-                              verify_legacy, _enum)
-from .legacy_migration import reconcile
+from .legacy_verifier import PRODUCT, token_digest
+from .legacy_migration import (_lock, _verify, _lineage, _persist, _reverse,
+    _reconcile_source, _refresh_entitlement, _audit)
 from .repository import connect
-from .security import sha256_text
-
-
-def _enabled(settings):
-    if not settings.legacy_notifications_enabled:
-        raise HTTPException(503, 'legacy notifications are disabled')
-
 
 def apple_notification(settings, payload):
-    _enabled(settings)
-    try:
-        signed = payload['signedPayload']
-        if not isinstance(signed, str) or len(signed) > 2*1024*1024:
-            raise ValueError()
-        verifier = apple_verifier(settings)
-        event = verifier.verify_and_decode_notification(signed)
-        if _enum(event.notificationType) not in ('REFUND', 'REVOKE'):
-            return {'status': 'ignored'}
-        item = verifier.verify_and_decode_signed_transaction(event.data.signedTransactionInfo)
-        if (item.revocationDate is None or _enum(item.type) != 'Non-Consumable'
-                or _enum(item.inAppOwnershipType) != 'PURCHASED'):
-            raise ValueError()
-        if not any(r.platform == 'ios' and r.product_id == item.productId for r in rules(settings)):
-            return {'status': 'ignored'}
-        canonical = identity_digest('apple', item.originalTransactionId)
-        purchase = LegacyPurchase('ios', item.productId, canonical,
-            tuple(sorted({canonical, identity_digest('apple', item.transactionId)})),
-            (item.transactionId, item.originalTransactionId), str(item.appAccountToken or ''),
-            int(item.originalPurchaseDate or item.purchaseDate), 'revoked', sha256_text(signed))
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(422, 'Apple notification rejected') from None
-    return reconcile(settings, purchase=purchase, apply=True)
-
+    raise HTTPException(410, 'Apple legacy migration is not supported')
 
 def verify_google_push(settings, authorization):
     if not settings.google_rtdn_audience or not settings.google_rtdn_email:
@@ -58,9 +24,9 @@ def verify_google_push(settings, authorization):
     except Exception:
         raise HTTPException(403, 'Google push authentication failed') from None
 
-
 def google_notification(settings, payload, authorization):
-    _enabled(settings)
+    if not settings.legacy_notifications_enabled:
+        raise HTTPException(503, 'legacy notifications are disabled')
     verify_google_push(settings, authorization)
     try:
         encoded = payload['message']['data']
@@ -69,45 +35,46 @@ def google_notification(settings, payload, authorization):
         event = json.loads(base64.b64decode(encoded, validate=True))
         if event['packageName'] != settings.google_play_package_name:
             raise ValueError()
-        notice = event.get('oneTimeProductNotification')
-        voided = event.get('voidedPurchaseNotification')
-        if notice and notice.get('notificationType') == 2:
-            token = notice['purchaseToken']
-            products = [notice['sku']]
-        elif voided and voided.get('productType') == 2:
-            token = voided['purchaseToken']
-            # Voided notifications omit SKU; resolve only our persisted identity
-            # or a provider-verified allowlist match, never caller-supplied status.
-            with connect(settings) as c:
-                row = c.execute("SELECT product_id FROM legacy_store_purchases WHERE platform='android' AND identity_digest=%s",
-                                (identity_digest('google-token', token),)).fetchone()
-            products = [row['product_id']] if row else [r.product_id for r in rules(settings) if r.platform == 'android']
+        notice, void = event.get('subscriptionNotification'), event.get('voidedPurchaseNotification')
+        if void and void.get('productType') == 1:
+            token, order_id, kind = void['purchaseToken'], void['orderId'], 'void'
+            if not isinstance(order_id, str) or not 0 < len(order_id) <= 250:
+                raise ValueError()
+        elif notice and notice.get('subscriptionId') == PRODUCT:
+            token, order_id, kind = notice['purchaseToken'], None, notice['notificationType']
         else:
             return {'status': 'ignored'}
-    except Exception:
+        digest = token_digest(token)
+    except (KeyError, ValueError, TypeError):
         raise HTTPException(422, 'Google notification rejected') from None
-    allowed = {r.product_id for r in rules(settings) if r.platform == 'android'}
-    for product_id in products:
-        if product_id not in allowed:
-            continue
-        # The authenticated cancel/void notification is itself authoritative for
-        # a known token. This works even when a refunded token later returns 410.
-        canonical = identity_digest('google-token', token)
+    # Commit authenticated tombstones first. Provider unavailability must not
+    # reopen a revoked token or lose an order void that preceded a claim.
+    if kind in ('void', 12):
         with connect(settings) as c:
-            known = c.execute("SELECT product_id FROM legacy_store_purchases WHERE platform='android' AND identity_digest=%s",
-                              (canonical,)).fetchone()
-        if known:
-            if known['product_id'] != product_id:
-                raise HTTPException(409, 'Google notification product mismatch')
-            purchase = LegacyPurchase('android', product_id, canonical, (canonical,), (), '', 0, 'revoked', '')
-        else:
-            try:
-                purchase = verify_legacy(settings, platform='android', product_id=product_id, verification_data=token)
-            except HTTPException:
-                continue
-            purchase = replace(purchase, state='revoked')
-        return reconcile(settings, purchase=purchase, apply=True)
-    # Retry rather than acknowledge a refund whose identity could not be checked.
-    if any(p in allowed for p in products):
-        raise HTTPException(503, 'Google notification identity needs retry')
-    return {'status': 'ignored'}
+            _lock(c)
+            if kind == 'void':
+                result = _reverse(c, order_id, 'refunded')
+            else:
+                c.execute('INSERT INTO legacy_subscription_token_revocations(token_digest) VALUES (%s) ON CONFLICT DO NOTHING', (digest,))
+                result = {'status': 'revoked_token'}
+            owner = c.execute('''SELECT l.user_id FROM legacy_subscription_lineages l
+                JOIN legacy_subscription_tokens t ON t.lineage_id=l.id WHERE t.token_digest=%s''', (digest,)).fetchone()
+            if owner:
+                _refresh_entitlement(c, owner['user_id'])
+        if kind == 'void':
+            return result
+    with connect(settings) as c:
+        _lock(c)
+        purchase = _verify(c, settings, dict(platform='android', product_id=PRODUCT, verification_data=token))
+        lineage = _lineage(c, purchase)
+        _persist(c, purchase, lineage)
+        result = _reconcile_source(c, settings, lineage)
+        # REVOKED applies to current entitlement; only reverse the grant when
+        # the provider's current order is the grant source. Other renewals do not.
+        if kind == 12:
+            grant = c.execute('SELECT source_order_id FROM legacy_subscription_grants WHERE lineage_id=%s', (lineage['id'],)).fetchone()
+            if grant and grant['source_order_id'] == purchase.current.latest_order_id and not purchase.current.entitled:
+                result = _reverse(c, grant['source_order_id'], 'revoked')
+        _refresh_entitlement(c, lineage['user_id'])
+        _audit(c, lineage['id'], 'subscription_sync', {'subscriptionState': purchase.current.state, 'notificationType': kind})
+        return result
