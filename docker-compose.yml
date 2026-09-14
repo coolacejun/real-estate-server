@@ -103,6 +103,7 @@ services:
       - MOBILE_REPORT_RENDERER_TIMEOUT_SECONDS=${MOBILE_REPORT_RENDERER_TIMEOUT_SECONDS:-45}
       - MOBILE_REPORT_RENDERER_MAX_PDF_BYTES=${MOBILE_REPORT_RENDERER_MAX_PDF_BYTES:-33554432}
       - ENVIRONMENT_DATA_DIR=/data/environment
+      - ENVIRONMENT_ANALYSIS_ENABLED=${ENVIRONMENT_ANALYSIS_ENABLED:-true}
     volumes:
       - ./data/uploads:/data/uploads
       - ./scripts:/scripts:ro
@@ -133,6 +134,7 @@ services:
       - APP_URL=https://building-land.com
       # 같은 호스트의 api 컨테이너로 직접 프록시 (외부 왕복 방지)
       - APP_SERVER_BASE_URL=http://api:8000
+      - ENVIRONMENT_ANALYSIS_ENABLED=${ENVIRONMENT_ANALYSIS_ENABLED:-true}
       - AUTH_DB_PATH=/data/web/auth.sqlite3
       - PLATFORM_API_BASE_URL=http://api:8000
       - SHARED_ARCHIVES_ENABLED=${SHARED_ARCHIVES_ENABLED:-false}
