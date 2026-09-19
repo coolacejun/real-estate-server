@@ -62,9 +62,9 @@ class SharedArchiveContractTest(unittest.TestCase):
             'byteSize': len(self.pdf), 'title': 'Saved local report', 'address': 'Synthetic address',
             'provenance': 'legacy-local', 'contentType': 'application/pdf'}
 
-    def user(self, subject):
+    def user(self, subject, provider='kakao'):
         with connect(self.settings) as connection:
-            user_id = resolve_oauth_identity(connection, provider='kakao', subject=subject,
+            user_id = resolve_oauth_identity(connection, provider=provider, subject=subject,
                 email='same@example.test', display_name=subject, link_user_id=None)
             token = issue_token_pair(connection, self.settings, user_id=user_id, device_id=f'device-{subject}-00000000')
         return user_id, {'Authorization': f"Bearer {token['accessToken']}"}
@@ -421,7 +421,10 @@ class SharedArchiveContractTest(unittest.TestCase):
             self.assertEqual(self.sql('SELECT * FROM platform_credit_ledger ORDER BY id'), ledger)
             self.assertEqual(str(self.sql('SELECT user_id FROM platform_archive_imports')[0]['user_id']), self.owner)
 
-    def test_real_web_cookie_adapter_matches_mobile_and_rejects_revoked_cookie(self):
+    def test_real_naver_web_cookie_and_mobile_round_trip_without_debit_and_reject_other_or_expired_sessions(self):
+        self.owner, self.headers = self.user('same-naver-subject', provider='naver')
+        ledger_before = self.sql('SELECT * FROM platform_credit_ledger ORDER BY id')
+        usages_before = self.sql('SELECT * FROM platform_report_usages')
         web_root = Path(os.environ['SHARED_WEB_REPO'])
         sys.path.insert(0, str(web_root))
         spec = importlib.util.spec_from_file_location('shared_web_contract', web_root / 'server.py')
@@ -438,21 +441,59 @@ class SharedArchiveContractTest(unittest.TestCase):
             with web.db_connect() as connection:
                 connection.execute('INSERT INTO sessions(id,user_id,created_at,expires_at,platform_auth_version) VALUES (?,?,?,?,0)',
                     ('synthetic-web-session-1234567890', web_user_id, web.unix_now(), web.unix_now()+3600))
-            self.sql("INSERT INTO platform_external_accounts(namespace,external_id,user_id) VALUES ('web',%s,%s) RETURNING user_id", (str(web_user_id),self.owner))
+            resolved = self.client.post('/api/internal/v1/web/accounts/resolve',
+                headers={'X-Internal-Service-Token': self.settings.internal_service_token},
+                json={'externalId': str(web_user_id), 'provider': 'naver', 'providerSubject': 'same-naver-subject',
+                      'providerClientId': 'test-client', 'email': 'same@example.test', 'displayName': 'Synthetic',
+                      'registrationConfirmed': True, 'legacyPaidRemaining': 0})
+            self.assertEqual(resolved.status_code, 200, resolved.text)
+            self.assertEqual(resolved.json()['userId'], self.owner)
             server = web.ThreadingHTTPServer(('127.0.0.1',0), web.Handler)
             worker = threading.Thread(target=server.serve_forever, daemon=True)
             worker.start()
             try:
                 os.environ['WEB_SESSION_INTROSPECTION_URL'] = f'http://127.0.0.1:{server.server_port}/api/internal/platform-session'
                 get_settings.cache_clear()
-                cookie = {'Cookie': 'bl_session=synthetic-web-session-1234567890'}
+                cookie = {'Cookie': 'bl_session=synthetic-web-session-1234567890',
+                          'Origin': 'https://building-land.com', 'X-Archive-Request': '1'}
                 response = self.client.get('/api/v1/report-archives', headers=cookie)
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(response.json()['items'][0]['id'], archive_id)
                 self.assertEqual(self.client.get(f'/api/v1/report-archives/{archive_id}/content', headers=cookie).content, self.pdf)
+                snapshot = self.client.post('/api/v1/report-archives', headers=cookie,
+                    json={'requestId': 'web-naver-round-trip', 'snapshot': {'title': 'Web snapshot',
+                          'address': 'Synthetic', 'pages': ['<div>Saved web report</div>']},
+                          'html': '<html><body>Saved web report</body></html>'})
+                self.assertEqual(snapshot.status_code, 200, snapshot.text)
+                web_id = snapshot.json()['id']
+                ids = {item['id'] for item in self.client.get('/api/v1/report-archives', headers=self.headers).json()['items']}
+                self.assertEqual(ids, {archive_id, web_id})
+                mobile_html = self.client.get(f'/api/v1/report-archives/{web_id}/content?format=html', headers=self.headers)
+                self.assertEqual(mobile_html.status_code, 200)
+                self.assertIn(b'Saved web report', mobile_html.content)
+                self.assertEqual(self.client.get('/api/v1/report-archives', headers=self.other_headers).json()['items'], [])
+                for item_id, content_format in ((archive_id, 'pdf'), (web_id, 'html')):
+                    for method, path in [('GET', f'/api/v1/report-archives/{item_id}'),
+                                         ('GET', f'/api/v1/report-archives/{item_id}/content?format={content_format}'),
+                                         ('DELETE', f'/api/v1/report-archives/{item_id}')]:
+                        self.assertEqual(self.client.request(method, path, headers=self.other_headers).status_code, 404)
+                        self.assertEqual(self.client.request(method, path).status_code, 401)
+                self.assertEqual(self.client.delete(f'/api/v1/report-archives/{archive_id}', headers=cookie).status_code, 200)
+                self.assertEqual(self.client.get(f'/api/v1/report-archives/{archive_id}', headers=self.headers).status_code, 404)
                 with web.db_connect() as connection:
-                    connection.execute('UPDATE sessions SET revoked_at=?', (web.unix_now(),))
+                    connection.execute('UPDATE sessions SET expires_at=?', (web.unix_now()-1,))
+                for method, path in [('GET', '/api/v1/report-archives'), ('GET', f'/api/v1/report-archives/{web_id}'),
+                                     ('GET', f'/api/v1/report-archives/{web_id}/content?format=html'),
+                                     ('DELETE', f'/api/v1/report-archives/{web_id}')]:
+                    self.assertEqual(self.client.request(method, path, headers=cookie).status_code, 401)
+                with web.db_connect() as connection:
+                    connection.execute('UPDATE sessions SET expires_at=?,revoked_at=?', (web.unix_now()+3600, web.unix_now()))
                 self.assertEqual(self.client.get('/api/v1/report-archives', headers=cookie).status_code, 401)
+                self.sql("UPDATE mobile_access_tokens SET expires_at=NOW()-INTERVAL '1 second' WHERE user_id=%s RETURNING user_id", (self.owner,))
+                for path in ('/api/v1/report-archives', f'/api/v1/report-archives/{web_id}/content?format=html'):
+                    self.assertEqual(self.client.get(path, headers=self.headers).status_code, 401)
+                self.assertEqual(self.sql('SELECT * FROM platform_credit_ledger ORDER BY id'), ledger_before)
+                self.assertEqual(self.sql('SELECT * FROM platform_report_usages'), usages_before)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -463,6 +504,22 @@ class SharedArchiveContractTest(unittest.TestCase):
                     os.environ['WEB_SESSION_INTROSPECTION_URL'] = previous_url
                 get_settings.cache_clear()
                 sys.path.remove(str(web_root))
+
+    def test_existing_unmapped_naver_account_and_different_client_scope_require_review(self):
+        owner, _ = self.user('existing-naver-subject', provider='naver')
+        ledger = self.sql('SELECT * FROM platform_credit_ledger ORDER BY id')
+        payload = {'externalId': 'existing-web-naver', 'provider': 'naver',
+                   'providerSubject': 'existing-naver-subject', 'providerClientId': 'test-client',
+                   'email': 'same@example.test', 'displayName': 'Same name', 'legacyPaidRemaining': 0}
+        for changes, reason in (({}, 'existing_web_account_requires_reviewed_mapping'),
+                                ({'registrationConfirmed': True, 'providerClientId': 'another-client'}, 'provider_scope_mismatch')):
+            response = self.client.post('/api/internal/v1/web/accounts/resolve',
+                headers={'X-Internal-Service-Token': self.settings.internal_service_token}, json={**payload, **changes})
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()['detail'], reason)
+        self.assertEqual(self.sql("SELECT * FROM platform_external_accounts WHERE external_id='existing-web-naver'"), [])
+        self.assertEqual(str(self.sql("SELECT user_id FROM platform_identities WHERE provider='naver' AND provider_subject='existing-naver-subject'")[0]['user_id']), owner)
+        self.assertEqual(self.sql('SELECT * FROM platform_credit_ledger ORDER BY id'), ledger)
 
 
 if __name__ == '__main__':
