@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -23,8 +24,17 @@ class ReleaseBlocked(RuntimeError):
 
 
 def git(repo: Path, *args: str) -> str:
+    # Hooks export their repository context. Every check below must instead use
+    # the explicit server or web checkout, especially after submodule absorption.
+    environment = os.environ.copy()
+    for name in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+                 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+                 'GIT_PREFIX', 'GIT_SUPER_PREFIX', 'GIT_SHALLOW_FILE',
+                 'GIT_GRAFT_FILE', 'GIT_QUARANTINE_PATH', 'GIT_IMPLICIT_WORK_TREE'):
+        environment.pop(name, None)
     result = subprocess.run(['git', '-c', f'safe.directory={repo.as_posix()}', *args], cwd=repo,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45,
+                            env=environment)
     if result.returncode:
         raise ReleaseBlocked(f'Git check failed: {args[0]} (exit {result.returncode})')
     return result.stdout.strip()

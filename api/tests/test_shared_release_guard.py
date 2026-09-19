@@ -6,6 +6,7 @@ import unittest
 import tempfile
 import hashlib
 import json
+import os
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('shared_release_guard', Path(__file__).resolve().parents[2] / 'scripts/check_shared_release.py')
@@ -14,6 +15,29 @@ spec.loader.exec_module(guard)
 
 
 class SharedReleaseGuardTest(unittest.TestCase):
+    def test_hook_repository_environment_cannot_redirect_web_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = Path(directory) / 'server'
+            web = server / 'web'
+            web.mkdir(parents=True)
+            for repo in (server, web):
+                guard.git(repo, 'init', '--quiet')
+                guard.git(repo, '-c', 'user.name=Release Guard Test',
+                          '-c', 'user.email=guard@example.invalid', 'commit',
+                          '--quiet', '--allow-empty', '-m', repo.name)
+            server_head = guard.git(server, 'rev-parse', 'HEAD')
+            web_head = guard.git(web, 'rev-parse', 'HEAD')
+            self.assertNotEqual(server_head, web_head)
+            inherited = {'GIT_DIR': str(server / '.git'),
+                         'GIT_WORK_TREE': str(server),
+                         'GIT_INDEX_FILE': str(server / '.git/index'),
+                         'GIT_COMMON_DIR': str(server / '.git')}
+            with patch.dict(os.environ, inherited):
+                self.assertEqual(guard.git(server, 'rev-parse', 'HEAD'), server_head)
+                self.assertEqual(guard.git(web, 'rev-parse', 'HEAD'), web_head)
+                (web / 'uncommitted.txt').write_text('dirty web checkout', encoding='utf-8')
+                self.assertEqual(guard.git(web, 'status', '--porcelain'), '?? uncommitted.txt')
+
     def test_environment_code_and_dataset_drift_block_publication(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);web=root/'web';api=root/'api/app/platform'

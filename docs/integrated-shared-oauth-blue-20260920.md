@@ -18,6 +18,12 @@ ec2e5868 OAuth 수정 이력을 병합하고 최신 화면에 색상·CSS cache�
 web gitlink 충돌을 위 최종 통합 웹 commit으로 명시적으로 해결했다.
 중앙 API runtime과 DB schema에는 추가 변경이 없다.
 
+첫 서버 push는 기존 pre-push guard가 상속된 `GIT_DIR` 때문에 web 조회에도
+서버 HEAD를 읽어 안전하게 중단됐다. guard의 Git 호출에서 저장소 지정 환경만
+제거해 명시한 checkout을 검사하도록 고쳤다. 별도의 실제 임시 Git 저장소 두 개로
+훅 환경 아래 HEAD 구분과 dirty web 검출을 회귀 검증한다. 원격 SHA/계약/clean
+검사를 제거하거나 훅을 건너뛰지 않는다. API runtime에는 영향이 없다.
+
 원본 dirty 파일과 초기 중복 모바일 draft, 별도 performance 변경은 포함하지
 않았다. 모바일은 검증된 최종 469b84e를 그대로 사용한다. 원격 9f47107에 이미
 포함된 이전 통합 이력은 유지하며, 별도의 legacy 기능을 새로 추가하지 않는다.
