@@ -28,6 +28,7 @@ SPEC.loader.exec_module(manager)
 
 
 class ReportTestGrantContracts(unittest.TestCase):
+    provider = "naver"
     def setUp(self) -> None:
         self.database_url = os.environ['DATABASE_URL']
         self.assertEqual(os.environ.get('APP_ENV'), 'test')
@@ -46,14 +47,14 @@ class ReportTestGrantContracts(unittest.TestCase):
             connection.execute(
                 """INSERT INTO platform_identities
                      (id,user_id,provider,provider_subject,provider_email,provider_email_verified)
-                   VALUES (%s,%s,'naver','synthetic-subject-owner','same@example.test',TRUE)""",
-                (self.identity, self.owner),
+                   VALUES (%s,%s,%s,'synthetic-subject-owner','same@example.test',TRUE)""",
+                (self.identity, self.owner, self.provider),
             )
             connection.execute(
                 """INSERT INTO platform_identities
                      (id,user_id,provider,provider_subject,provider_email,provider_email_verified)
-                   VALUES (%s,%s,'naver','synthetic-subject-other','same@example.test',TRUE)""",
-                (str(uuid.uuid4()), self.other),
+                   VALUES (%s,%s,%s,'synthetic-subject-other','same@example.test',TRUE)""",
+                (str(uuid.uuid4()), self.other, self.provider),
             )
             connection.execute(
                 """INSERT INTO platform_external_accounts(namespace,external_id,user_id)
@@ -71,12 +72,13 @@ class ReportTestGrantContracts(unittest.TestCase):
 
     def manage(self, action: str, *, apply: bool = False, **overrides) -> int:
         environment = {
-            'REPORT_TEST_NAVER_SUBJECT': 'synthetic-subject-owner',
+            'REPORT_TEST_PROVIDER': self.provider,
+            f'REPORT_TEST_{self.provider.upper()}_SUBJECT': 'synthetic-subject-owner',
             'REPORT_TEST_WEB_EXTERNAL_ID': 'synthetic-web-owner',
             'REPORT_TEST_USER_ID': self.owner,
             'REPORT_TEST_EXPECTED_EMAIL': 'same@example.test',
-            'REPORT_TEST_WEB_NAVER_CLIENT_ID': 'test-client',
-            'NAVER_OAUTH_CLIENT_ID': 'test-client',
+            f'REPORT_TEST_WEB_{self.provider.upper()}_CLIENT_ID': 'test-client',
+            f'{self.provider.upper()}_OAUTH_CLIENT_ID': 'test-client',
             'REPORT_TEST_ACTOR': 'synthetic-operator',
         }
         environment.update(overrides)
@@ -137,7 +139,7 @@ class ReportTestGrantContracts(unittest.TestCase):
 
     def test_wrong_scope_mapping_email_only_and_other_account_never_grant(self):
         self.assertEqual(self.manage('grant', apply=True,
-                                    REPORT_TEST_WEB_NAVER_CLIENT_ID='another-client'), 1)
+                                    **{f'REPORT_TEST_WEB_{self.provider.upper()}_CLIENT_ID': 'another-client'}), 1)
         self.assertEqual(self.manage('grant', apply=True,
                                     REPORT_TEST_WEB_EXTERNAL_ID='not-mapped'), 1)
         self.assertEqual(self.manage('grant', apply=True,
@@ -172,3 +174,33 @@ class ReportTestGrantContracts(unittest.TestCase):
         self.assertCountEqual(outcomes, ['render', 409])
         self.assertEqual(len(self.sql('SELECT id FROM platform_report_usages')), 1)
         self.assertEqual(self.sql('SELECT * FROM platform_credit_ledger'), [])
+
+
+    def test_existing_balances_preserved_and_other_provider_cannot_substitute(self):
+        other_provider = 'kakao' if self.provider == 'naver' else 'naver'
+        with psycopg.connect(self.database_url) as connection:
+            connection.execute('UPDATE platform_users SET free_remaining=2,paid_remaining=7 WHERE id=%s', (self.owner,))
+            connection.execute(
+                """INSERT INTO platform_identities (id,user_id,provider,provider_subject,provider_email)
+                   VALUES (%s,%s,%s,'synthetic-subject-owner','same@example.test')""",
+                (str(uuid.uuid4()), self.other, other_provider),
+            )
+        self.assertEqual(self.manage('grant', apply=True, REPORT_TEST_PROVIDER='google'), 1)
+        self.assertEqual(self.manage('grant', apply=True, **{
+            'REPORT_TEST_PROVIDER': other_provider,
+            f'REPORT_TEST_{other_provider.upper()}_SUBJECT': 'synthetic-subject-owner',
+            f'REPORT_TEST_WEB_{other_provider.upper()}_CLIENT_ID': 'test-client',
+            f'{other_provider.upper()}_OAUTH_CLIENT_ID': 'test-client',
+        }), 1)
+        self.assertEqual(self.manage('grant', apply=True), 0)
+        usage = begin_final_usage(self.settings, user_id=self.owner,
+                                  request_id='synthetic:paid-preserved', canonical=self.canonical)['usage']
+        self.assertEqual(usage['no_charge_reason'], 'test_report_grant')
+        fail_final_usage(self.settings, str(usage['id']), 'synthetic_failure')
+        self.assertEqual(self.sql('SELECT free_remaining,paid_remaining FROM platform_users WHERE id=%s',
+                                  (self.owner,))[0], {'free_remaining': 2, 'paid_remaining': 7})
+        self.assertEqual(self.sql('SELECT * FROM platform_credit_ledger'), [])
+
+
+class KakaoReportTestGrantContracts(ReportTestGrantContracts):
+    provider = "kakao"

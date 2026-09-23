@@ -1,4 +1,4 @@
-"""Inspect or change one reviewed Naver account's report-test grant.
+"""Inspect or change one reviewed Naver or Kakao account's report-test grant.
 
 Run only against a verified deployment after migration 015 and matching API/web
 code are live. Identity inputs come from independently checked auth records.
@@ -32,14 +32,18 @@ def main() -> int:
     args = parser.parse_args()
     try:
         database_url = required('DATABASE_URL')
-        subject = required('REPORT_TEST_NAVER_SUBJECT')
+        provider = os.environ.get('REPORT_TEST_PROVIDER', 'naver').strip().lower()
+        if provider not in {'naver', 'kakao'}:
+            raise ValueError('Unsupported report-test identity provider')
+        provider_key = provider.upper()
+        subject = required(f'REPORT_TEST_{provider_key}_SUBJECT')
         web_external_id = required('REPORT_TEST_WEB_EXTERNAL_ID')
         user_id = str(uuid.UUID(required('REPORT_TEST_USER_ID')))
         expected_email = required('REPORT_TEST_EXPECTED_EMAIL').casefold()
-        web_client_id = required('REPORT_TEST_WEB_NAVER_CLIENT_ID')
-        api_client_id = os.environ.get('NAVER_OAUTH_CLIENT_ID', '').strip() or required('NAVER_CLIENT_ID')
+        web_client_id = required(f'REPORT_TEST_WEB_{provider_key}_CLIENT_ID')
+        api_client_id = os.environ.get(f'{provider_key}_OAUTH_CLIENT_ID', '').strip() or required(f'{provider_key}_CLIENT_ID')
         if not hmac.compare_digest(web_client_id, api_client_id):
-            raise ValueError('Web and API Naver client scopes differ')
+            raise ValueError('Web and API social client scopes differ')
         actor = required('REPORT_TEST_ACTOR') if args.apply else None
         if actor and len(actor) > 120:
             raise ValueError('Actor label is too long')
@@ -60,18 +64,18 @@ def main() -> int:
                     raise ValueError('The expected active central user was not found')
                 identity = connection.execute(
                     """SELECT id,user_id,provider_email,is_active FROM platform_identities
-                       WHERE provider='naver' AND provider_subject=%s""", (subject,)
+                       WHERE provider=%s AND provider_subject=%s""", (provider, subject)
                 ).fetchone()
                 mapping = connection.execute(
                     """SELECT user_id FROM platform_external_accounts
                        WHERE namespace='web' AND external_id=%s""", (web_external_id,)
                 ).fetchone()
                 if identity is None or str(identity['user_id']) != user_id:
-                    raise ValueError('Naver subject is not bound to the expected central user')
+                    raise ValueError('Social subject is not bound to the expected central user')
                 if mapping is None or str(mapping['user_id']) != user_id:
                     raise ValueError('Verified web account is not bound to the same central user')
                 if args.action == 'grant' and not identity['is_active']:
-                    raise ValueError('Naver identity is disconnected')
+                    raise ValueError('Social identity is disconnected')
                 emails = [str(value or '').casefold() for value in (user['email'], identity['provider_email'])]
                 if expected_email not in emails:
                     raise ValueError('Email clue does not match this verified identity')

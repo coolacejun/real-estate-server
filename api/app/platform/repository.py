@@ -162,14 +162,14 @@ def resolve_oauth_identity(
 
 
 def has_report_test_grant(connection: psycopg.Connection, user_id: str) -> bool:
-    """Use the same central account and its still-linked Naver identity."""
+    """Use the same central account and its still-linked reviewed social identity."""
     return connection.execute(
         """SELECT EXISTS (
             SELECT 1 FROM platform_report_test_grants grant_record
             JOIN platform_identities identity ON identity.id = grant_record.naver_identity_id
             WHERE grant_record.user_id = %s AND grant_record.active
               AND identity.user_id = grant_record.user_id
-              AND identity.provider = 'naver' AND identity.is_active
+              AND identity.provider IN ('naver', 'kakao') AND identity.is_active
         ) AS allowed""", (user_id,),
     ).fetchone()["allowed"] is True
 
