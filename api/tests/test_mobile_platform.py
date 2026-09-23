@@ -201,7 +201,10 @@ class MobilePlatformContractTest(unittest.TestCase):
             json={"code": code, "codeVerifier": verifier, "deviceId": "device-contract-test-0001"},
         )
         self.assertEqual(token.status_code, 200, token.text)
-        self.assertEqual(token.json()["creditSummary"], {"freeRemaining": 3, "paidRemaining": 0, "availableCredits": 3})
+        self.assertEqual(token.json()["creditSummary"], {
+            "freeRemaining": 3, "paidRemaining": 0, "availableCredits": 3,
+            "reportTestAccess": False,
+        })
         replay = self.client.post(
             "/api/mobile/v1/auth/token",
             json={"code": code, "codeVerifier": verifier, "deviceId": "device-contract-test-0001"},
@@ -827,7 +830,10 @@ class MobilePlatformContractTest(unittest.TestCase):
             json={"requestId": "request-free-first-0001", "report": self._report()},
         )
         self.assertEqual(first.status_code, 200, first.text)
-        self.assertEqual(self._credit_summary(headers), {"freeRemaining": 0, "paidRemaining": 1, "availableCredits": 1})
+        self.assertEqual(self._credit_summary(headers), {
+            "freeRemaining": 0, "paidRemaining": 1, "availableCredits": 1,
+            "reportTestAccess": False,
+        })
         with patch("app.platform.routes.render_pdf", side_effect=HTTPException(status_code=500, detail="render failed")):
             failed = self.client.post(
                 "/api/mobile/v1/reports/final",
@@ -835,7 +841,10 @@ class MobilePlatformContractTest(unittest.TestCase):
                 json={"requestId": "request-refund-paid-0002", "report": self._report("Failure")},
             )
         self.assertEqual(failed.status_code, 500)
-        self.assertEqual(self._credit_summary(headers), {"freeRemaining": 0, "paidRemaining": 1, "availableCredits": 1})
+        self.assertEqual(self._credit_summary(headers), {
+            "freeRemaining": 0, "paidRemaining": 1, "availableCredits": 1,
+            "reportTestAccess": False,
+        })
 
     def test_stale_final_reservation_is_refunded_then_retried_once(self) -> None:
         user_id, _, headers = self._create_user(free=1)

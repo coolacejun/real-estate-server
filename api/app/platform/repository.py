@@ -38,7 +38,7 @@ def connect(settings: PlatformSettings) -> Iterator[psycopg.Connection]:
 def assert_schema(connection: psycopg.Connection) -> None:
     try:
         row = connection.execute(
-            "SELECT version FROM schema_migrations WHERE version = '014_legacy_subscription_migration'"
+            "SELECT version FROM schema_migrations WHERE version = '015_report_test_grants'"
         ).fetchone()
     except psycopg.Error as exc:
         raise HTTPException(status_code=503, detail="account database migration is required") from exc
@@ -161,6 +161,19 @@ def resolve_oauth_identity(
     return user_id
 
 
+def has_report_test_grant(connection: psycopg.Connection, user_id: str) -> bool:
+    """Use the same central account and its still-linked Naver identity."""
+    return connection.execute(
+        """SELECT EXISTS (
+            SELECT 1 FROM platform_report_test_grants grant_record
+            JOIN platform_identities identity ON identity.id = grant_record.naver_identity_id
+            WHERE grant_record.user_id = %s AND grant_record.active
+              AND identity.user_id = grant_record.user_id
+              AND identity.provider = 'naver' AND identity.is_active
+        ) AS allowed""", (user_id,),
+    ).fetchone()["allowed"] is True
+
+
 def profile_payload(connection: psycopg.Connection, user_id: str) -> dict[str, Any]:
     user = connection.execute(
         """
@@ -211,6 +224,7 @@ def profile_payload(connection: psycopg.Connection, user_id: str) -> dict[str, A
             "freeRemaining": free,
             "paidRemaining": paid,
             "availableCredits": free + paid,
+            "reportTestAccess": has_report_test_grant(connection, user_id),
         },
         "storeEntitlements": [
             {

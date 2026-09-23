@@ -28,7 +28,7 @@ from .canonical_v3_contract import (
     CanonicalReportError,
     validate_canonical_report as validate_semantic_report,
 )
-from .repository import assert_schema, connect, new_id, utcnow
+from .repository import assert_schema, connect, has_report_test_grant, new_id, utcnow
 from .security import REQUEST_ID_RE, SHA256_RE, sha256_bytes
 
 
@@ -1133,8 +1133,18 @@ def render_html(
 
 
 def _restore_usage_credit(connection: Any, usage: dict[str, Any], error_code: str) -> None:
-    if usage.get("refund_ledger_id") or not usage.get("debit_bucket"):
+    if usage.get("refund_ledger_id"):
         return
+    if usage.get("no_charge_reason") == "test_report_grant":
+        connection.execute(
+            """UPDATE platform_report_usages SET status = 'failed', error_code = %s,
+                 failed_at = NOW(), updated_at = NOW()
+               WHERE id = %s AND status = 'pending'""",
+            (error_code[:80], usage["id"]),
+        )
+        return
+    if not usage.get("debit_bucket"):
+        raise HTTPException(status_code=500, detail="report usage has no debit source")
     bucket = str(usage["debit_bucket"])
     user = connection.execute(
         f"SELECT {bucket}_remaining FROM platform_users WHERE id = %s FOR UPDATE",
@@ -1206,39 +1216,47 @@ def begin_final_usage(
         ).fetchone()
         if user is None:
             raise HTTPException(status_code=401, detail="login required")
-        if int(user["free_remaining"]) > 0:
+        test_access = has_report_test_grant(connection, user_id)
+        if test_access:
+            bucket = None
+        elif int(user["free_remaining"]) > 0:
             bucket = "free"
         elif int(user["paid_remaining"]) > 0:
             bucket = "paid"
         else:
             raise HTTPException(status_code=402, detail="사용 가능한 무료 또는 유료 보고서 건수가 없습니다.")
-        balance = int(user[f"{bucket}_remaining"]) - 1
-        connection.execute(
-            f"UPDATE platform_users SET {bucket}_remaining = %s, updated_at = NOW() WHERE id = %s",
-            (balance, user_id),
-        )
+        if bucket is not None:
+            balance = int(user[f"{bucket}_remaining"]) - 1
+            connection.execute(
+                f"UPDATE platform_users SET {bucket}_remaining = %s, updated_at = NOW() WHERE id = %s",
+                (balance, user_id),
+            )
         usage_id = str(existing["id"]) if existing is not None else new_id()
         attempt = int(existing["attempt_count"]) + 1 if existing is not None else 1
-        ledger_id = new_id()
-        connection.execute(
-            """
-            INSERT INTO platform_credit_ledger
-              (id, user_id, bucket, delta, reason, idempotency_key, reference_type, reference_id, balance_after)
-            VALUES (%s, %s, %s, -1, 'report_final', %s, 'report_usage', %s, %s)
-            """,
-            (ledger_id, user_id, bucket, f"report-debit:{usage_id}:{attempt}", usage_id, balance),
-        )
+        ledger_id = None
+        if bucket is not None:
+            ledger_id = new_id()
+            connection.execute(
+                """
+                INSERT INTO platform_credit_ledger
+                  (id, user_id, bucket, delta, reason, idempotency_key, reference_type, reference_id, balance_after)
+                VALUES (%s, %s, %s, -1, 'report_final', %s, 'report_usage', %s, %s)
+                """,
+                (ledger_id, user_id, bucket, f"report-debit:{usage_id}:{attempt}", usage_id, balance),
+            )
+        no_charge_reason = "test_report_grant" if test_access else None
         if existing is None:
             connection.execute(
                 """
                 INSERT INTO platform_report_usages
                   (id, user_id, request_id, content_hash, renderer_profile, renderer_version,
-                   status, debit_bucket, debit_ledger_id, attempt_count)
-                VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, 1)
+                   status, debit_bucket, debit_ledger_id, attempt_count, no_charge_reason)
+                VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, 1, %s)
                 """,
                 (
                     usage_id, user_id, request_id, canonical.content_hash,
                     canonical.renderer_profile, canonical.response_renderer_version, bucket, ledger_id,
+                    no_charge_reason,
                 ),
             )
         else:
@@ -1247,11 +1265,12 @@ def begin_final_usage(
                 UPDATE platform_report_usages
                 SET status = 'pending', renderer_profile = %s, renderer_version = %s,
                     debit_bucket = %s, debit_ledger_id = %s, refund_ledger_id = NULL,
-                    attempt_count = %s, error_code = NULL, reserved_at = NOW(),
+                    attempt_count = %s, no_charge_reason = %s, error_code = NULL, reserved_at = NOW(),
                     completed_at = NULL, failed_at = NULL, updated_at = NOW()
                 WHERE id = %s
                 """,
-                (canonical.renderer_profile, canonical.response_renderer_version, bucket, ledger_id, attempt, usage_id),
+                (canonical.renderer_profile, canonical.response_renderer_version, bucket, ledger_id,
+                 attempt, no_charge_reason, usage_id),
             )
         usage = connection.execute("SELECT * FROM platform_report_usages WHERE id = %s", (usage_id,)).fetchone()
         return {"action": "render", "usage": dict(usage)}
