@@ -11,21 +11,25 @@ http:
       priority: 200
       entryPoints:
         - web
+        - tunnel
     homepage:
       rule: Host(`building-land.com`) || Host(`www.building-land.com`)
       service: homepage
       entryPoints:
         - web
+        - tunnel
     api:
       rule: PathPrefix(`/`)
       service: api
       entryPoints:
         - web
+        - tunnel
     traefik-dashboard:
       rule: PathPrefix(`/traefik`)
       service: api@internal
       entryPoints:
         - web
+        - tunnel
 
   services:
     api:
