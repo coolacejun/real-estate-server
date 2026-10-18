@@ -92,6 +92,55 @@ paths:
       responses:
         '200': {$ref: '#/components/responses/Profile'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/mobile/v1/credits/history:
+    get:
+      summary: List the authenticated account's app-store and legacy paid-credit changes
+      description: >-
+        Credit ledger activity, not payment receipts or a remaining-balance history.
+        Web payment and reversal events are excluded because web receipts are read
+        separately. Free grants, report use, and imported balances are excluded.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+        - {name: cursor, in: query, schema: {type: string, maxLength: 120}}
+      responses:
+        '200':
+          description: Most recent paid-credit events, newest first; private and uncached
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/PaidCreditEvent'}}
+                  nextCursor: {type: [string, 'null']}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/mobile/v1/credits/web-payments:
+    get:
+      summary: List the authenticated account's web credit-pack payment receipts
+      description: >-
+        Read-only paid and canceled records from the linked web account. The
+        mobile server and web server both verify the platform user ID mapping.
+        Amounts come from original payment records and may be absent.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+        - {name: cursor, in: query, schema: {type: string, maxLength: 100}}
+      responses:
+        '200':
+          description: Web credit-pack receipts, newest first; private and uncached
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/WebCreditPayment'}}
+                  nextCursor: {type: [string, 'null']}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {description: Web account mapping requires review}
+        '503': {$ref: '#/components/responses/Unavailable'}
   /api/mobile/v1/store/catalog:
     get:
       summary: Return exact current and retired SKU policy plus account binding token
@@ -250,6 +299,26 @@ components:
         reportTestAccess:
           type: boolean
           description: Revocable, account-scoped final-report test access. Does not alter credit balances.
+    PaidCreditEvent:
+      type: object
+      required: [kind, creditsDelta, occurredAt]
+      properties:
+        kind:
+          type: string
+          enum: [app_purchase, legacy_conversion, legacy_conversion_reversal]
+        creditsDelta: {type: integer}
+        occurredAt: {type: string, format: date-time}
+    WebCreditPayment:
+      type: object
+      required: [id, credits, amount, currency, status, occurredAt, canceledAt]
+      properties:
+        id: {type: string, description: Stable web payment record ID}
+        credits: {type: [integer, 'null'], description: Original credit grant count when recorded}
+        amount: {type: [integer, 'null'], minimum: 0, description: Original payment amount; never derived from SKU price}
+        currency: {type: string}
+        status: {type: string, enum: [paid, canceled]}
+        occurredAt: {type: string, description: Original web payment local timestamp}
+        canceledAt: {type: [string, 'null'], description: Original web cancellation local timestamp}
     Profile:
       type: object
       required: [authenticated, user, socialAccounts, creditSummary, storeEntitlements]

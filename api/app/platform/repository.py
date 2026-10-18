@@ -444,6 +444,58 @@ def store_account_token(connection: psycopg.Connection, user_id: str, platform: 
     return str(row["account_token"])
 
 
+_CREDIT_HISTORY_KINDS = {
+    "store_purchase": "app_purchase",
+    "legacy_subscription_migration_v1": "legacy_conversion",
+    "legacy_subscription_reversal_v1": "legacy_conversion_reversal",
+}
+
+
+def list_paid_credit_history(
+    connection: psycopg.Connection,
+    *,
+    user_id: str,
+    limit: int,
+    before: tuple[datetime, str] | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Return app-store and legacy paid-credit changes for one owner.
+
+    Web receipts are read from the web payment source through a separate
+    owner-checked endpoint, so a paid web receipt and its reversal are not
+    presented again as duplicate ledger entries.
+    """
+    query = """
+        SELECT ledger.id, ledger.delta, ledger.reason, ledger.created_at
+        FROM platform_credit_ledger AS ledger
+        WHERE ledger.user_id = %s AND ledger.bucket = 'paid'
+          AND ledger.reason IN (
+            'store_purchase', 'legacy_subscription_migration_v1',
+            'legacy_subscription_reversal_v1'
+          )
+    """
+    params: list[Any] = [user_id]
+    if before is not None:
+        query += " AND (ledger.created_at, ledger.id) < (%s, %s::uuid)"
+        params.extend(before)
+    query += " ORDER BY ledger.created_at DESC, ledger.id DESC LIMIT %s"
+    params.append(limit + 1)
+    rows = connection.execute(query, params).fetchall()
+    visible = rows[:limit]
+    items = [
+        {
+            "kind": _CREDIT_HISTORY_KINDS[row["reason"]],
+            "creditsDelta": int(row["delta"]),
+            "occurredAt": row["created_at"].isoformat(),
+        }
+        for row in visible
+    ]
+    next_cursor = None
+    if len(rows) > limit:
+        last = visible[-1]
+        next_cursor = f"{last['created_at'].isoformat()}|{last['id']}"
+    return items, next_cursor
+
+
 def grant_paid_credits(
     connection: psycopg.Connection,
     *,

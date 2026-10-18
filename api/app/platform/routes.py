@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 import re
 import time
+from datetime import datetime
 from collections import defaultdict, deque
 from threading import Lock
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
@@ -37,6 +39,7 @@ from .repository import (
     connect,
     get_or_create_store_account,
     grant_paid_credits,
+    list_paid_credit_history,
     profile_payload,
     record_auth_event,
     complete_paid_credit_reversal,
@@ -49,6 +52,7 @@ from .repository import (
 )
 from .security import DEVICE_ID_RE, client_key, constant_time_equal, sha256_bytes
 from .store import catalog, process_purchase
+from .web_payments import read_web_credit_payments
 
 
 router = APIRouter()
@@ -234,6 +238,98 @@ def mobile_me(
         payload = profile_payload(connection, session["user_id"])
     response.headers["Cache-Control"] = "private, no-store"
     return payload
+
+
+@router.get("/api/mobile/v1/credits/history")
+def mobile_credit_history(
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=120),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    before = None
+    if cursor is not None:
+        try:
+            timestamp_raw, ledger_id_raw = cursor.split("|", 1)
+            timestamp = datetime.fromisoformat(timestamp_raw)
+            ledger_id = UUID(ledger_id_raw)
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                raise ValueError("cursor timestamp must have a timezone")
+            before = (timestamp, str(ledger_id))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail="invalid credit history cursor") from exc
+    with connect(_settings()) as connection:
+        assert_schema(connection)
+        session = authenticate_access_token(connection, _raw_bearer(authorization))
+        items, next_cursor = list_paid_credit_history(
+            connection, user_id=session["user_id"], limit=limit, before=before
+        )
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"items": items, "nextCursor": next_cursor}
+
+
+@router.get("/api/mobile/v1/credits/web-payments")
+def mobile_web_credit_payments(
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=100),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    settings = _settings()
+    with connect(settings) as connection:
+        assert_schema(connection)
+        session = authenticate_access_token(connection, _raw_bearer(authorization))
+        linked = connection.execute(
+            """SELECT external_id FROM platform_external_accounts
+               WHERE namespace = 'web' AND user_id = %s""",
+            (session["user_id"],),
+        ).fetchall()
+    response.headers["Cache-Control"] = "private, no-store"
+    if not linked:
+        return {"items": [], "nextCursor": None}
+    if len(linked) != 1:
+        raise HTTPException(409, "web account connection requires review")
+    payload = read_web_credit_payments(
+        settings,
+        external_id=str(linked[0]["external_id"]),
+        platform_user_id=str(session["user_id"]),
+        limit=limit,
+        cursor=cursor,
+    )
+    if "nextCursor" not in payload:
+        raise HTTPException(503, "invalid web payment history response")
+    next_cursor = payload.get("nextCursor")
+    if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor):
+        raise HTTPException(503, "invalid web payment history response")
+    items = payload["items"]
+    if len(items) > limit:
+        raise HTTPException(503, "invalid web payment history response")
+    seen_ids: set[str] = set()
+    for item in items:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), str)
+            or not isinstance(item.get("occurredAt"), str)
+            or item.get("status") not in ("paid", "canceled")
+            or (item.get("credits") is not None and
+                (type(item["credits"]) is not int or item["credits"] <= 0))
+            or (item.get("amount") is not None and
+                (type(item["amount"]) is not int or item["amount"] < 0))
+            or not isinstance(item.get("currency"), str)
+            or (item.get("canceledAt") is not None and
+                not isinstance(item["canceledAt"], str))
+        ):
+            raise HTTPException(503, "invalid web payment history response")
+        if item["id"] in seen_ids:
+            raise HTTPException(503, "invalid web payment history response")
+        seen_ids.add(item["id"])
+        try:
+            datetime.fromisoformat(item["occurredAt"])
+            if item["canceledAt"] is not None:
+                datetime.fromisoformat(item["canceledAt"])
+        except ValueError as exc:
+            raise HTTPException(503, "invalid web payment history response") from exc
+    return {"items": items, "nextCursor": next_cursor}
 
 
 @router.post("/api/mobile/v1/auth/logout", status_code=204)

@@ -15,6 +15,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import psycopg
+from psycopg.rows import dict_row
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -34,7 +35,14 @@ from app.main import app
 from app.platform.config import get_settings
 from app.platform.oauth import ProviderIdentity, fetch_provider_identity
 from app.platform.reports import begin_final_usage, fail_final_usage, render_pdf, validate_canonical_report
-from app.platform.repository import new_id
+from app.platform.repository import (
+    complete_paid_credit_reversal,
+    grant_paid_credits,
+    new_id,
+    prepare_paid_credit_reversal,
+    profile_payload,
+    rollback_paid_credit_reversal,
+)
 from app.platform.security import sha256_text
 from app.platform.store import (
     AppleStoreVerifier,
@@ -151,6 +159,99 @@ class MobilePlatformContractTest(unittest.TestCase):
         response = self.client.get("/api/mobile/v1/me", headers=headers)
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["creditSummary"]
+
+    def test_paid_credit_history_is_owner_scoped_and_excludes_web_receipt_duplicates(self) -> None:
+        owner, _, headers = self._create_user()
+        _, _, other_headers = self._create_user()
+        self.assertEqual(self.client.get("/api/mobile/v1/credits/history").status_code, 401)
+        self.assertEqual(self.client.get(
+            "/api/mobile/v1/credits/history?cursor=invalid", headers=headers
+        ).status_code, 422)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            common = {"connection": connection, "user_id": owner}
+            for reason, credits, key in (
+                ("store_purchase", 10, "store:history-test"),
+                ("web_payment", 3, "web:history-test"),
+                ("legacy_subscription_migration_v1", 10, "legacy:history-test"),
+                ("web_balance_migration", 2, "migration:history-test"),
+            ):
+                grant_paid_credits(
+                    **common, credits=credits, reason=reason,
+                    idempotency_key=key, reference_type="test", reference_id=key,
+                )
+            repeated, _ = grant_paid_credits(
+                **common, credits=10, reason="store_purchase",
+                idempotency_key="store:history-test", reference_type="test",
+                reference_id="store:history-test",
+            )
+            self.assertFalse(repeated)
+            prepare_paid_credit_reversal(connection, user_id=owner, credits=3, external_key="history-rollback")
+            rollback_paid_credit_reversal(connection, user_id=owner, external_key="history-rollback")
+            prepare_paid_credit_reversal(connection, user_id=owner, credits=3, external_key="history-complete")
+            complete_paid_credit_reversal(connection, user_id=owner, external_key="history-complete")
+
+        response = self.client.get("/api/mobile/v1/credits/history", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
+        events = response.json()["items"]
+        self.assertEqual(len(events), 2)
+        self.assertEqual({item["kind"] for item in events}, {
+            "app_purchase", "legacy_conversion",
+        })
+        self.assertFalse(any("status" in item for item in events))
+        self.assertTrue(all(set(item).issubset({"kind", "creditsDelta", "occurredAt", "status"})
+                            for item in events))
+        self.assertEqual(response.json()["nextCursor"], None)
+        self.assertEqual(self.client.get(
+            "/api/mobile/v1/credits/history", headers=other_headers
+        ).json()["items"], [])
+
+        collected = []
+        cursor = None
+        while True:
+            page = self.client.get(
+                "/api/mobile/v1/credits/history", headers=headers,
+                params={"limit": 2, **({"cursor": cursor} if cursor else {})},
+            )
+            self.assertEqual(page.status_code, 200, page.text)
+            collected.extend(page.json()["items"])
+            cursor = page.json()["nextCursor"]
+            if cursor is None:
+                break
+        self.assertEqual(collected, events)
+
+    def test_web_payment_history_uses_only_the_authenticated_web_owner_link(self) -> None:
+        owner, _, headers = self._create_user()
+        _, _, other_headers = self._create_user()
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            connection.execute(
+                """INSERT INTO platform_external_accounts(namespace, external_id, user_id)
+                   VALUES ('web', '42', %s)""", (owner,),
+            )
+        receipt = {
+            "id": "7", "credits": 10, "amount": 9900, "currency": "KRW",
+            "status": "canceled", "occurredAt": "2026-10-17T01:05:00",
+            "canceledAt": "2026-10-17T01:10:00",
+        }
+        self.assertEqual(self.client.get("/api/mobile/v1/credits/web-payments").status_code, 401)
+        with patch("app.platform.routes.read_web_credit_payments", return_value={
+            "items": [receipt], "nextCursor": "2026-10-17T01:05:00|7",
+        }) as source:
+            response = self.client.get(
+                "/api/mobile/v1/credits/web-payments?limit=1", headers=headers,
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers["cache-control"], "private, no-store")
+            self.assertEqual(response.json()["items"], [receipt])
+            source.assert_called_once()
+            self.assertEqual(source.call_args.kwargs["external_id"], "42")
+            self.assertEqual(source.call_args.kwargs["platform_user_id"], owner)
+            self.assertEqual(source.call_args.kwargs["limit"], 1)
+        with patch("app.platform.routes.read_web_credit_payments") as source:
+            other = self.client.get("/api/mobile/v1/credits/web-payments", headers=other_headers)
+            self.assertEqual(other.status_code, 200, other.text)
+            self.assertEqual(other.json(), {"items": [], "nextCursor": None})
+            source.assert_not_called()
 
     def _oauth_login(self, provider: str, subject: str, email: str) -> dict[str, object]:
         verifier = "p" * 64
