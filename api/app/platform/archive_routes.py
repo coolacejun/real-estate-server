@@ -103,6 +103,9 @@ async def archive_create(request: Request, response: Response):
     if isinstance(payload, dict) and 'snapshot' in payload:
         if principal['auth_type'] != 'cookie':
             raise HTTPException(403, 'web session required for HTML snapshots')
+        expected_web_user_id = request.headers.get('x-expected-web-user-id')
+        if expected_web_user_id is not None and expected_web_user_id != principal['external_id']:
+            raise HTTPException(409, 'web account changed')
         response.headers.update(PRIVATE)
         return archives.create_web_snapshot(settings, user_id, payload)
     if not isinstance(payload, dict) or set(payload) != {'uploadId'}:
