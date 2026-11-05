@@ -61,7 +61,7 @@ def main():
                 SHARED_WEB_REPO=str(args.web_repo.resolve()), PLATFORM_API_BASE_URL='')
             import psycopg
             with psycopg.connect(os.environ['DATABASE_URL'], autocommit=True) as connection:
-                for name in ('009_mobile_platform.sql', '010_mobile_auth_hardening.sql', '011_shared_archives.sql', '012_identity_connections.sql', '013_legacy_store_migration.sql', '014_legacy_subscription_migration.sql'):
+                for name in ('009_mobile_platform.sql', '010_mobile_auth_hardening.sql', '011_shared_archives.sql', '012_identity_connections.sql', '013_legacy_store_migration.sql', '014_legacy_subscription_migration.sql', '015_report_test_grants.sql'):
                     connection.execute((repo / 'db' / name).read_text(encoding='utf-8'))
             sys.path.insert(0, str(repo / 'api'))
             if args.pattern != 'test_shared_archives.py':

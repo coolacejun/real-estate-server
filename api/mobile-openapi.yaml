@@ -242,11 +242,14 @@ components:
   schemas:
     CreditSummary:
       type: object
-      required: [freeRemaining, paidRemaining, availableCredits]
+      required: [freeRemaining, paidRemaining, availableCredits, reportTestAccess]
       properties:
         freeRemaining: {type: integer, minimum: 0}
         paidRemaining: {type: integer, minimum: 0}
         availableCredits: {type: integer, minimum: 0}
+        reportTestAccess:
+          type: boolean
+          description: Revocable, account-scoped final-report test access. Does not alter credit balances.
     Profile:
       type: object
       required: [authenticated, user, socialAccounts, creditSummary, storeEntitlements]
