@@ -32,7 +32,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from psycopg import sql
-from logging.handlers import RotatingFileHandler
+from .request_log_retention import RetentionFileHandler as RotatingFileHandler
 
 from .pnu_aliases import pnu_query_candidates as _build_pnu_query_candidates
 from .platform import router as platform_router
@@ -63,6 +63,10 @@ def _configure_server_log_file_handler() -> None:
         SERVER_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
+        file_handler = RotatingFileHandler(SERVER_LOG_FILE, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        file_handler.setLevel(logging.INFO)
+
         for logger_name in ("uvicorn.error", "uvicorn.access"):
             logger = logging.getLogger(logger_name)
             has_file_handler = any(
@@ -73,14 +77,6 @@ def _configure_server_log_file_handler() -> None:
             if has_file_handler:
                 continue
 
-            file_handler = RotatingFileHandler(
-                SERVER_LOG_FILE,
-                maxBytes=20 * 1024 * 1024,
-                backupCount=5,
-                encoding="utf-8",
-            )
-            file_handler.setFormatter(formatter)
-            file_handler.setLevel(logging.INFO)
             logger.addHandler(file_handler)
 
         _SERVER_LOG_HANDLER_READY = True

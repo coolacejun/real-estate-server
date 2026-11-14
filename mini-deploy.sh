@@ -8,7 +8,9 @@ DST="/Users/jun/server/"
 SSH_OPTS=(-i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 RSYNC_SSH="ssh -i $KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 
-rsync -aH --partial --progress -e "$RSYNC_SSH" "$SRC" "$MINI:$DST"
+rsync -aH --partial --progress \
+  --exclude=/logs/ --exclude=/data/uploads/logs/ --exclude=/data/uploads_test/logs/ \
+  --exclude="*.log" --exclude="*.log.*" -e "$RSYNC_SSH" "$SRC" "$MINI:$DST"
 ssh "${SSH_OPTS[@]}" "$MINI" '/bin/zsh -lc "
 if ! command -v docker >/dev/null 2>&1; then
   echo \"[ERROR] docker not found on mac mini. Install Docker Desktop and launch it once.\"

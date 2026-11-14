@@ -1,5 +1,10 @@
 services:
   traefik:
+    # VM journal expiry timer enforces time retention, even when idle.
+    logging:
+      driver: journald
+      options:
+        tag: traefik
     image: traefik:v3.1
     container_name: traefik
     command:
@@ -20,6 +25,11 @@ services:
     env_file: .env
 
   api:
+    # VM journal expiry timer enforces time retention, even when idle.
+    logging:
+      driver: journald
+      options:
+        tag: api
     build: ./api
     container_name: api
     env_file: .env
@@ -130,10 +140,16 @@ services:
     restart: unless-stopped
 
   web:
+    # VM journal expiry timer enforces time retention, even when idle.
+    logging:
+      driver: journald
+      options:
+        tag: web
     build: ./web
     container_name: web
     env_file: .env
     environment:
+      - PYTHONUNBUFFERED=1
       - REAL_ESTATE_REPORT_HOST=0.0.0.0
       - REAL_ESTATE_REPORT_PORT=5180
       - APP_URL=https://building-land.com
