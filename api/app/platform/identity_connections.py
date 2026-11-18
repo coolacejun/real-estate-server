@@ -32,7 +32,7 @@ def require_recent_auth(settings, session: dict) -> None:
 
 def disconnect_identity(settings, session: dict, provider: str) -> dict:
     require_recent_auth(settings, session)
-    if provider not in ('kakao', 'naver', 'google'):
+    if provider not in ('kakao', 'naver', 'google', 'apple'):
         raise HTTPException(422, 'unsupported identity')
     user_id = session['user_id']
     with connect(settings) as connection:
@@ -44,6 +44,9 @@ def disconnect_identity(settings, session: dict, provider: str) -> dict:
             raise HTTPException(404, 'identity not connected')
         if not any(row['provider'] != provider for row in rows):
             raise HTTPException(409, 'cannot disconnect the last login method')
+        if provider == 'apple':
+            from .apple_signin import revoke_apple_credentials
+            revoke_apple_credentials(settings, connection, user_id)
         connection.execute('UPDATE platform_identities SET is_active=FALSE,disconnected_at=NOW(),updated_at=NOW() WHERE user_id=%s AND provider=%s', (user_id, provider))
         _revoke_account_sessions(connection, user_id, 'identity_disconnected')
         record_auth_event(connection, event_type='identity_disconnected', user_id=user_id, provider=provider)
@@ -74,6 +77,8 @@ def withdraw_account(settings, session: dict, confirmed: bool) -> dict:
             (user_id,user_id,user_id)).fetchone()['busy']
         if user['paid_remaining'] or pending:
             raise HTTPException(409, 'remaining purchased credits or pending transactions require review before withdrawal')
+        from .apple_signin import revoke_apple_credentials
+        revoke_apple_credentials(settings, connection, user_id)
         connection.execute("UPDATE platform_users SET status='withdrawn',withdrawn_at=NOW() WHERE id=%s", (user_id,))
         _revoke_account_sessions(connection, user_id, 'withdrawn')
         record_auth_event(connection, event_type='account_withdrawn', user_id=user_id,

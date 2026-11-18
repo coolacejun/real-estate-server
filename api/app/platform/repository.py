@@ -38,7 +38,7 @@ def connect(settings: PlatformSettings) -> Iterator[psycopg.Connection]:
 def assert_schema(connection: psycopg.Connection) -> None:
     try:
         row = connection.execute(
-            "SELECT version FROM schema_migrations WHERE version = '015_report_test_grants'"
+            "SELECT version FROM schema_migrations WHERE version = '016_apple_signin'"
         ).fetchone()
     except psycopg.Error as exc:
         raise HTTPException(status_code=503, detail="account database migration is required") from exc

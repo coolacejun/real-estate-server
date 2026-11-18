@@ -7,5 +7,6 @@ Pillow
 ijson
 reportlab>=4.2,<5
 cryptography>=50,<51
+PyJWT[crypto]>=2.10,<3
 google-auth[requests]>=2.35,<3
 pypdf>=6,<7

@@ -103,6 +103,10 @@ services:
       - GOOGLE_RTDN_AUDIENCE=${GOOGLE_RTDN_AUDIENCE:-}
       - GOOGLE_RTDN_EMAIL=${GOOGLE_RTDN_EMAIL:-}
       - APPLE_BUNDLE_ID=${APPLE_BUNDLE_ID:-}
+      - APPLE_SIGNIN_TEAM_ID=${APPLE_SIGNIN_TEAM_ID:-}
+      - APPLE_SIGNIN_KEY_ID=${APPLE_SIGNIN_KEY_ID:-}
+      - APPLE_SIGNIN_PRIVATE_KEY_FILE=/run/secrets/apple-signin.p8
+      - APPLE_SIGNIN_TOKEN_KEY=${APPLE_SIGNIN_TOKEN_KEY:-}
       - APPLE_SHARED_SECRET=${APPLE_SHARED_SECRET:-}
       - APPLE_ROOT_CA_FILE=/run/secrets/apple-root-ca.pem
       - GOOGLE_PLAY_PACKAGE_NAME=${GOOGLE_PLAY_PACKAGE_NAME:-}
@@ -131,6 +135,7 @@ services:
       - ${REPORT_ASSET_HOST_DIR:-./data/report-assets}:/data/report-assets
       - ${ENVIRONMENT_DATA_HOST_DIR:-./web/data}:/data/environment:ro
       - ${APPLE_ROOT_CA_HOST_FILE:-/dev/null}:/run/secrets/apple-root-ca.pem:ro
+      - ${APPLE_SIGNIN_PRIVATE_KEY_HOST_FILE:-/dev/null}:/run/secrets/apple-signin.p8:ro
       - ${GOOGLE_PLAY_SERVICE_ACCOUNT_HOST_FILE:-/dev/null}:/run/secrets/google-play-service-account.json:ro
     depends_on:
       migrate:

@@ -92,7 +92,10 @@ def _session(authorization: str | None) -> dict[str, str]:
     settings = _settings()
     with connect(settings) as connection:
         assert_schema(connection)
-        return authenticate_access_token(connection, _raw_bearer(authorization))
+        session = authenticate_access_token(connection, _raw_bearer(authorization))
+    from .apple_signin import validate_saved_apple_authorization
+    validate_saved_apple_authorization(settings, session['user_id'])
+    return session
 
 
 def _optional_session(authorization: str | None) -> dict[str, str] | None:
@@ -158,6 +161,42 @@ async def mobile_oauth_start(
         link_auth_binding=auth_binding(session) if session else None,
     )
     response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@router.post('/api/mobile/v1/auth/apple/start')
+async def mobile_apple_start(request: Request, response: Response,
+                             authorization: str | None = Header(default=None)) -> dict[str, str]:
+    from .apple_signin import begin_apple_signin
+    _rate_limit(request, 'apple-start', 12, 60)
+    payload = _body(await request.json())
+    session = _session(authorization) if payload.get('linkAccount') is True else None
+    result = begin_apple_signin(_settings(), code_challenge=str(payload.get('codeChallenge') or ''),
+                                 link_session=session)
+    response.headers['Cache-Control'] = 'no-store'
+    return result
+
+
+@router.post('/api/mobile/v1/auth/apple/token')
+async def mobile_apple_token(request: Request, response: Response,
+                             authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    from .apple_signin import complete_apple_signin
+    _rate_limit(request, 'apple-token', 20, 60)
+    if len(await request.body()) > 32768:
+        raise HTTPException(413, 'Apple login request is too large')
+    payload = _body(await request.json())
+    device_id = str(payload.get('deviceId') or '')
+    if not DEVICE_ID_RE.fullmatch(device_id):
+        raise HTTPException(422, 'deviceId is invalid')
+    result = complete_apple_signin(
+        _settings(), state=str(payload.get('state') or ''),
+        code_verifier=str(payload.get('codeVerifier') or ''), device_id=device_id,
+        identity_token=str(payload.get('identityToken') or ''),
+        authorization_code=str(payload.get('authorizationCode') or ''),
+        full_name=str(payload.get('fullName') or ''),
+        link_session=_session(authorization) if authorization else None,
+    )
+    response.headers['Cache-Control'] = 'no-store'
     return result
 
 

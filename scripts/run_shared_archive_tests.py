@@ -21,9 +21,12 @@ def main():
     parser.add_argument('--postgres-bin', type=Path, required=True)
     parser.add_argument('--work-dir', type=Path, required=True)
     parser.add_argument('--pattern', default='test_shared_archives.py')
-    parser.add_argument('--web-repo', type=Path, required=True)
+    parser.add_argument('--web-repo', type=Path)
+    parser.add_argument('--auth-only', action='store_true', help='Run authentication contracts without the web renderer')
     parser.add_argument('--case', action='append', help='Run only this fully qualified unittest case')
     args = parser.parse_args()
+    if not args.auth_only and args.web_repo is None:
+        parser.error('--web-repo is required unless --auth-only is set')
     repo = Path(__file__).resolve().parents[1]
     args.work_dir.mkdir(parents=True, exist_ok=True)
     suffix = '.exe' if os.name == 'nt' else ''
@@ -58,13 +61,14 @@ def main():
             started = True
             os.environ.update(DATABASE_URL=f'postgresql://archive_contract:{password}@127.0.0.1:{port}/postgres',
                 APP_ENV='test', STORE_VERIFIER_MODE='fake', REPORT_ASSET_DIR=str(root / 'assets'),
-                SHARED_WEB_REPO=str(args.web_repo.resolve()), PLATFORM_API_BASE_URL='')
+                SERVER_LOG_FILE=str(root / 'api.log'),
+                SHARED_WEB_REPO=str(args.web_repo.resolve()) if args.web_repo else '', PLATFORM_API_BASE_URL='')
             import psycopg
             with psycopg.connect(os.environ['DATABASE_URL'], autocommit=True) as connection:
-                for name in ('009_mobile_platform.sql', '010_mobile_auth_hardening.sql', '011_shared_archives.sql', '012_identity_connections.sql', '013_legacy_store_migration.sql', '014_legacy_subscription_migration.sql', '015_report_test_grants.sql'):
+                for name in ('009_mobile_platform.sql', '010_mobile_auth_hardening.sql', '011_shared_archives.sql', '012_identity_connections.sql', '013_legacy_store_migration.sql', '014_legacy_subscription_migration.sql', '015_report_test_grants.sql', '016_apple_signin.sql'):
                     connection.execute((repo / 'db' / name).read_text(encoding='utf-8'))
             sys.path.insert(0, str(repo / 'api'))
-            if args.pattern != 'test_shared_archives.py':
+            if args.pattern != 'test_shared_archives.py' and not args.auth_only:
                 if os.name == 'nt':
                     import types
                     import msvcrt

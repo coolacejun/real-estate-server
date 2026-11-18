@@ -73,12 +73,20 @@ class PlatformSettings:
     legacy_notifications_enabled: bool = False
     google_rtdn_audience: str = ''
     google_rtdn_email: str = ''
+    apple_signin_team_id: str = ''
+    apple_signin_key_id: str = ''
+    apple_signin_private_key_file: str = ''
+    apple_signin_token_key: str = ''
 
     @classmethod
     def from_env(cls) -> "PlatformSettings":
         database_url = os.getenv("DATABASE_URL", "").strip()
         return cls(
             database_url=database_url,
+            apple_signin_team_id=os.getenv('APPLE_SIGNIN_TEAM_ID', '').strip(),
+            apple_signin_key_id=os.getenv('APPLE_SIGNIN_KEY_ID', '').strip(),
+            apple_signin_private_key_file=os.getenv('APPLE_SIGNIN_PRIVATE_KEY_FILE', '').strip(),
+            apple_signin_token_key=os.getenv('APPLE_SIGNIN_TOKEN_KEY', '').strip(),
             legacy_grant_enabled=os.getenv('LEGACY_GRANT_ENABLED', 'false').lower() == 'true',
             legacy_notifications_enabled=os.getenv('LEGACY_NOTIFICATIONS_ENABLED', 'false').lower() == 'true',
             google_rtdn_audience=os.getenv('GOOGLE_RTDN_AUDIENCE', ''),
