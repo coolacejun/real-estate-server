@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 from . import archives
 from .config import get_settings
@@ -30,7 +31,7 @@ async def identity_start(request: Request, response: Response):
     from .identity_connections import auth_binding, require_recent_auth
     from .oauth import begin_oauth
     settings = get_settings()
-    principal = shared_session(settings, request)
+    principal = await run_in_threadpool(shared_session, settings, request)
     if principal['auth_type'] != 'bearer':
         raise HTTPException(422, 'web account connections use /api/auth/{provider}/start?link=1')
     require_recent_auth(settings, principal)
@@ -55,10 +56,10 @@ def identity_disconnect(provider: str, request: Request, response: Response):
 async def account_withdraw(request: Request, response: Response):
     from .identity_connections import withdraw_account
     settings = get_settings()
-    principal = shared_session(settings, request)
+    principal = await run_in_threadpool(shared_session, settings, request)
     payload = await request.json()
     response.headers.update(PRIVATE)
-    return withdraw_account(settings, principal, isinstance(payload, dict) and payload.get('confirm') == 'withdraw-account')
+    return await run_in_threadpool(withdraw_account, settings, principal, isinstance(payload, dict) and payload.get('confirm') == 'withdraw-account')
 
 
 def _principal(request: Request, *, upload: bool = False):
@@ -76,7 +77,7 @@ def archive_list(request: Request, response: Response, cursor: str | None = None
 
 @router.post('/api/v1/report-archives/uploads')
 async def upload_start(request: Request, response: Response):
-    settings, user_id = _principal(request, upload=True)
+    settings, user_id = await run_in_threadpool(_principal, request, upload=True)
     payload = await request.json()
     if not isinstance(payload, dict):
         raise HTTPException(422, 'object required')
@@ -87,7 +88,7 @@ async def upload_start(request: Request, response: Response):
 @router.put('/api/v1/report-archives/uploads/{upload_id}/content')
 async def upload_content(upload_id: str, request: Request, response: Response):
     from starlette.concurrency import run_in_threadpool
-    settings, user_id = _principal(request, upload=True)
+    settings, user_id = await run_in_threadpool(_principal, request, upload=True)
     response.headers.update(PRIVATE)
     return await run_in_threadpool(archives.put_upload, settings, user_id, upload_id,
                                   await request.body(), request.headers.get('content-type', ''))
@@ -97,7 +98,7 @@ async def upload_content(upload_id: str, request: Request, response: Response):
 async def archive_create(request: Request, response: Response):
     settings = get_settings()
     archives.require_enabled(settings)
-    principal = shared_session(settings, request)
+    principal = await run_in_threadpool(shared_session, settings, request)
     user_id = principal['user_id']
     payload = await request.json()
     if isinstance(payload, dict) and 'snapshot' in payload:

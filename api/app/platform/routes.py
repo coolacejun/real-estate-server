@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
 from .config import PlatformSettings, get_settings
 from .environment import analyze_environment
@@ -148,7 +149,7 @@ async def mobile_oauth_start(
     _rate_limit(request, "oauth-start", 12, 60)
     payload = _body(await request.json())
     link_requested = payload.get("linkAccount") is True
-    session = _session(authorization) if link_requested else None
+    session = await run_in_threadpool(_session, authorization) if link_requested else None
     if session:
         from .identity_connections import auth_binding, require_recent_auth
         require_recent_auth(_settings(), session)
@@ -170,8 +171,8 @@ async def mobile_apple_start(request: Request, response: Response,
     from .apple_signin import begin_apple_signin
     _rate_limit(request, 'apple-start', 12, 60)
     payload = _body(await request.json())
-    session = _session(authorization) if payload.get('linkAccount') is True else None
-    result = begin_apple_signin(_settings(), code_challenge=str(payload.get('codeChallenge') or ''),
+    session = await run_in_threadpool(_session, authorization) if payload.get('linkAccount') is True else None
+    result = await run_in_threadpool(begin_apple_signin, _settings(), code_challenge=str(payload.get('codeChallenge') or ''),
                                  link_session=session)
     response.headers['Cache-Control'] = 'no-store'
     return result
@@ -188,13 +189,13 @@ async def mobile_apple_token(request: Request, response: Response,
     device_id = str(payload.get('deviceId') or '')
     if not DEVICE_ID_RE.fullmatch(device_id):
         raise HTTPException(422, 'deviceId is invalid')
-    result = complete_apple_signin(
+    result = await run_in_threadpool(complete_apple_signin,
         _settings(), state=str(payload.get('state') or ''),
         code_verifier=str(payload.get('codeVerifier') or ''), device_id=device_id,
         identity_token=str(payload.get('identityToken') or ''),
         authorization_code=str(payload.get('authorizationCode') or ''),
         full_name=str(payload.get('fullName') or ''),
-        link_session=_session(authorization) if authorization else None,
+        link_session=await run_in_threadpool(_session, authorization) if authorization else None,
     )
     response.headers['Cache-Control'] = 'no-store'
     return result
@@ -230,7 +231,7 @@ async def mobile_auth_token(request: Request, response: Response, authorization:
         code=str(payload.get("code") or ""),
         code_verifier=str(payload.get("codeVerifier") or ""),
         device_id=device_id,
-        link_session=_session(authorization) if authorization else None,
+        link_session=await run_in_threadpool(_session, authorization) if authorization else None,
     )
     response.headers["Cache-Control"] = "no-store"
     return result
@@ -321,7 +322,7 @@ async def _store_request(
 ) -> dict[str, Any]:
     _rate_limit(request, "store-verify", 30, 60)
     payload = _body(await request.json())
-    session = _session(authorization)
+    session = await run_in_threadpool(_session, authorization)
     if bool(payload.get("restored")) != restored:
         raise HTTPException(status_code=422, detail="restored flag does not match endpoint")
     return process_purchase(
@@ -385,9 +386,9 @@ async def mobile_report_preview(
         from .archives import require_enabled
         from .shared_session import shared_session
         require_enabled(_settings())
-        shared_session(_settings(), request)
+        await run_in_threadpool(shared_session, _settings(), request)
     else:
-        _session(authorization)
+        await run_in_threadpool(_session, authorization)
     payload = _body(await request.json())
     canonical = validate_canonical_report(
         payload.get("report"), requested_profile=payload.get("rendererProfile"),
@@ -407,9 +408,9 @@ async def mobile_report_final(
         from .archives import require_enabled
         from .shared_session import shared_session
         require_enabled(_settings())
-        session = shared_session(_settings(), request)
+        session = await run_in_threadpool(shared_session, _settings(), request)
     else:
-        session = _session(authorization)
+        session = await run_in_threadpool(_session, authorization)
     payload = _body(await request.json())
     canonical = validate_canonical_report(
         payload.get("report"),

@@ -7,6 +7,8 @@ import os
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -124,6 +126,29 @@ class AppleSignInContractTest(unittest.TestCase):
         replay, provider = self._finish(flow)
         self.assertEqual(replay.status_code, 401)
         self.assertEqual(provider.call_count, 0)
+
+    def test_slow_apple_exchange_does_not_block_other_api_requests(self):
+        flow = self._start()
+        entered, release = Event(), Event()
+        provider_tokens = {'id_token': self._jwt(flow), 'refresh_token': 'synthetic-provider-refresh-apple-user'}
+        def slow_exchange(*args):
+            entered.set()
+            if not release.wait(timeout=5):
+                raise RuntimeError('test release timed out')
+            return provider_tokens
+        with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as pool:
+            with patch('app.platform.apple_signin._apple_post', side_effect=slow_exchange):
+                login = pool.submit(client.post, '/api/mobile/v1/auth/apple/token', json={
+                    'state': flow['state'], 'codeVerifier': self.verifier, 'deviceId': 'apple-contract-device-0001',
+                    'identityToken': self._jwt(flow), 'authorizationCode': 'synthetic-one-use-code'})
+                self.assertTrue(entered.wait(timeout=2))
+                try:
+                    other = pool.submit(client.get, '/openapi.json').result(timeout=2)
+                    self.assertEqual(other.status_code, 200)
+                finally:
+                    release.set()
+                result = login.result(timeout=5)
+                self.assertEqual(result.status_code, 200, result.text)
 
     def test_wrong_pkce_cannot_exchange(self):
         flow = self._start()

@@ -21,6 +21,8 @@ def shared_session(settings: PlatformSettings, request: Request) -> dict:
             raise HTTPException(401, 'invalid bearer token')
         with connect(settings) as connection:
             session = authenticate_access_token(connection, authorization[7:])
+        from .apple_signin import validate_saved_apple_authorization
+        validate_saved_apple_authorization(settings, session['user_id'])
         return {**session, 'auth_type': 'bearer'}
 
     cookie = SimpleCookie()
